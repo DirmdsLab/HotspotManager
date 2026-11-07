@@ -35,6 +35,22 @@ After installing Vector:
 4. Open Vector and navigate to the **Modules** section.
 5. Enable the module and check both options available in the HotspotManager application menu.
 
+## Device
+
+**Device:** Infinix Xpad
+
+[Device Specifications – GSMArena](https://www.gsmarena.com/infinix_xpad-13263.php)
+
+| Specification | Details |
+|---|---|
+| Device | Infinix Xpad |
+| RAM | 4 GB |
+| Internal Storage | 256 GB |
+| Stock ROM Base | Android 14 |
+| GSI ROM | Android 16 |
+
+
+
 ## Build Instructions
 
 ### 1. Clone the Repository
