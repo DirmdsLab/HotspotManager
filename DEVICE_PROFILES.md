@@ -1,10 +1,10 @@
-# Device profiles in Hotspot Manager 0.7.1
+# Device profiles in Hotspot Manager 0.8.0
 
 ## Existing controls retained
 
 The Detected devices cards retain the interface (`ap0` / `rndis0`), IPv4 address,
 MAC address, neighbor state, dynamic/static indication, locked IP, and both
-existing IP-assignment buttons. The only additional summary field is Device type.
+existing IP-assignment buttons. Additional summary fields show Device type and optional IPv4 download/upload speeds.
 Tap the card or its IP address to open that MAC's details.
 
 The gateway, DHCP, fixed DNS, reservations, USB-first recovery, GUI tethering
@@ -21,7 +21,7 @@ switches, and ADB tethering commands retain their existing behavior.
 | Temporary type | With Remember settings unchecked, the type lasts only for the app process. |
 | Wi-Fi block | Available only when the native Soft AP capability reports client force-disconnect support, or when an existing block needs removal. |
 | Saved device profiles | Added below the existing Manual & Saved content, so a blocked/disconnected MAC can still be opened and reset. |
-| Reset | Removes the chosen MAC's profile and any native Wi-Fi block; releases only its selected-interface DHCP reservation. |
+| Reset | Removes the chosen MAC's profile, rate policy and native Wi-Fi block; releases only its selected-interface DHCP reservation. |
 
 ## Blocked-device list in 0.7.1
 
@@ -31,7 +31,7 @@ app profile or a current neighbor record. Unblock on this list keeps the profile
 and IP reservation. Refresh reloads native state; failed reads are shown as an
 error/last-known snapshot, not as an empty blocklist.
 
-See TRAFFIC_STATUS.md for why per-IP speed/limiting still require device verification.
+See TRAFFIC_STATUS.md for the optional software IPv4 speed/limit mode and its physical validation requirements.
 
 ## MAC identity and persistence
 
@@ -49,7 +49,7 @@ Settings.Global DHCP-reservation JSON; its schema and key remain unchanged.
 Temporary profiles disappear when Android terminates the app process.
 
 Unchecking Remember settings and saving removes that permanent type profile.
-If the MAC has a native Wi-Fi block, unblock it first; a permanent block cannot
+Remove any saved rate policy first. If the MAC has a native Wi-Fi block, unblock it first; a permanent block cannot
 be presented as temporary. The app also refuses to remove a permanent profile
 while its native block state could not be read.
 
@@ -86,7 +86,7 @@ USB per-device blocking is skipped. A Wi-Fi block does not block USB traffic.
 ## Reset scope
 
 Reset asks for confirmation naming the selected MAC and interface. It first
-removes any native Wi-Fi block for that MAC, then writes the reservation update,
+removes any native Wi-Fi block and rate policy for that MAC, then writes the reservation update,
 and removes the local profile after that write succeeds. Other MACs and
 reservations for the other interface are retained. A client must renew DHCP or
 reconnect to receive a dynamic address after its reservation is removed.
@@ -97,23 +97,30 @@ shown; an already removed Wi-Fi block is not automatically re-added. Retry reset
 after resolving root/configuration access. Reset does not erase native DHCP
 history or disconnect all tethering interfaces.
 
+## Traffic policies
+
+The details page adds separate download/upload Mbps fields. Remember settings
+must be enabled to save a nonzero limit. The policy is permanent and keyed by MAC,
+independently of DHCP reservations. Remove MAC rate limits clears both directions;
+reset also clears the MAC policy. A running monitor refreshes active rules after
+a change. Stops and failures are reported; saved policies alone do not prove
+that a cap is being enforced. See TRAFFIC_STATUS.md.
+
 ## Features intentionally skipped
 
-| Requested feature | Status in 0.7.0 |
+| Requested feature | Status in 0.8.0 |
 |---|---|
 | Exact connection start time | Not reported by the native client/lease metadata used here. No lease-expiration subtraction or first-observation estimate is substituted. |
-| Per-device data usage | No reliable per-client byte accounting is supplied by this Android path. |
-| Current per-device Internet speed | Not shown without a reliable per-client byte/time source. |
-| Per-IP/MAC speed limiting | Not implemented through firewall/traffic-control workarounds. |
+| Cumulative per-device data usage | Not implemented. Software meter counters can reset and do not provide historical usage. |
+| Internet-only / IPv6 throughput | The optional monitor reports IPv4 traffic including local traffic, not Internet-only or IPv6 throughput. |
+| IPv6 or aggregate multi-address cap | Not implemented. Software policing applies separately to each current IPv4/MAC binding. |
 | Per-device data quota | Not implemented without reliable per-client usage and enforcement. |
 | Individual USB blocking | No native per-client control is used; USB tethering is not stopped as a substitute. |
 | Automatic physical device type/model | Unknown until assigned manually. Hostnames remain labeled as client-supplied DHCP hostnames. |
 
-No iptables/tc rules, offload changes, traffic redirection, background packet
-capture, or ongoing polling service are added. Native Android statistics often
-cover interface pairs/upstreams rather than individual client MACs; hardware
-and eBPF offload further make generic software counters unsuitable as a claimed
-per-client measurement here.
+No quota, packet capture, vendor-identity guess, or USB-disconnect substitute
+is added. The optional Software QoS mode explicitly changes acceleration settings
+and adds its own IPv4 tc filters. Ordinary tethering starts with this mode off.
 
 ## Device validation
 

@@ -21,6 +21,11 @@ final class RootShell {
     }
 
     static Result run(String command) {
+        return run(command, 65536);
+    }
+
+    static Result run(String command, int outputLimit) {
+        if (outputLimit < 1024 || outputLimit > 1048576) throw new IllegalArgumentException("Invalid output bound.");
         Process process = null;
         StringBuffer output = new StringBuffer();
         try {
@@ -33,7 +38,7 @@ final class RootShell {
                     int count;
                     while ((count = input.read(buffer)) != -1) {
                         synchronized (output) {
-                            int remaining = 65536 - output.length();
+                            int remaining = outputLimit - output.length();
                             if (remaining > 0) output.append(buffer, 0, Math.min(count, remaining));
                         }
                     }

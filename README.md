@@ -1,9 +1,38 @@
-# Hotspot Manager 0.7.1
+# Hotspot Manager 0.8.0
 
 A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
 networks and live DHCP reservations. Intended device: Infinix with MediaTek
 Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
 Tethering and NetworkStack class layout used by this project.
+
+## Version 0.8.0 optional Software QoS
+
+- Show each detected IPv4 address's measured download/upload speed in Mbps.
+- Save separate download/upload rate policies by MAC; blank means unlimited.
+- Reapply a policy to the same MAC's current managed IPv4 address on reconnect.
+- Run monitoring in an explicit foreground service with a Stop action.
+- Prepare Software QoS with backed-up hardware/BPF offload settings and a required
+  reboot; verify native offload state before installing filters or reporting rates.
+- Restore the original offload settings and remove only app-owned traffic filters.
+- Keep the native Blocked devices list and selected-MAC Unblock below the device list.
+
+Software QoS is off by default. To use it: **Prepare software mode → reboot
+Android → enable tethering → Start monitoring**. To leave it: **Restore native
+mode → reboot Android**. CPU/battery use can increase and total throughput can
+fall while native acceleration is disabled. Restore before uninstalling or
+clearing app data so recovery information remains available.
+
+Rates include local IPv4 traffic and protocol overhead; they are interval
+averages, not Internet-only throughput or Wi-Fi link bitrate. IPv6 is neither
+measured nor limited. The limiter uses packet policing with short bursts rather
+than a traffic queue. Each current IPv4 binding receives its MAC's policy; it is
+not an aggregate cap across several addresses belonging to the same MAC.
+
+Device diagnostics confirmed the relevant kernel features and Android tc binary.
+Live speed accuracy and enforcement still require physical Infinix traffic tests;
+they were not available in the build environment. Missing capabilities or
+unexpected offload state produce an error instead of a fabricated speed.
+See [TRAFFIC_STATUS.md](TRAFFIC_STATUS.md) for operation and validation.
 
 ## Version 0.7.1 blocked-device list
 
@@ -13,8 +42,6 @@ Tethering and NetworkStack class layout used by this project.
 - Distinguish a failed list read from a confirmed empty list.
 - Include a read-only firmware diagnostics script for future per-IP traffic control.
 
-Per-IP realtime speed and speed limiting remain pending device verification.
-See [TRAFFIC_STATUS.md](TRAFFIC_STATUS.md) for the constraint and diagnostic commands.
 
 ## Version 0.7.0 device profiles
 
@@ -22,7 +49,8 @@ See [TRAFFIC_STATUS.md](TRAFFIC_STATUS.md) for the constraint and diagnostic com
 - Tap a device/IP to open native metadata and settings scoped to that MAC.
 - Save permanent device-type profiles, reopen saved/disconnected MACs, or reset one device.
 - Native Wi-Fi MAC blocking is capability-gated and persists in Android's own blocklist.
-- Exact connection time, per-client usage/speed/limits/quota, and USB blocking are skipped.
+- Exact connection time, cumulative usage/quota, and native USB blocking remain unavailable.
+  Version 0.8.0 adds optional IPv4 speed monitoring and rate policies.
 
 See [DEVICE_PROFILES.md](DEVICE_PROFILES.md) for supported fields, persistence,
 reset scope, omitted features, and firmware validation.
@@ -128,7 +156,7 @@ pool. A client must renew DHCP or reconnect after its reservation changes.
 ## Included release artifact
 
 The fixed source distribution includes
-`artifacts/HotspotManager-0.7.1-unsigned.apk`. Sign it before installation using
+`artifacts/HotspotManager-0.8.0-unsigned.apk`. Sign it before installation using
 the instructions below. `VALIDATION.md` records the completed checks and their
 limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 

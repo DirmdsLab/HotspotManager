@@ -10,6 +10,11 @@ import android.content.res.ColorStateList;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Bundle;
+import android.os.Build;
+import android.os.SystemClock;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.text.InputType;
 import android.view.View;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -43,6 +48,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.text.DateFormat;
 
 public final class MainActivity extends Activity {
@@ -105,6 +112,16 @@ public final class MainActivity extends Activity {
     private final BlockedDeviceState blockedDevices = new BlockedDeviceState();
     private boolean blockedDevicesLoading;
     private LinearLayout blockedDevicesContainer;
+    private final Map<TextView, Client> trafficViews = new LinkedHashMap<>();
+    private TextView trafficStatusView;
+    private Button trafficPrepareButton, trafficStartButton, trafficStopButton, trafficRestoreButton;
+    private boolean trafficBusy;
+    private final Runnable trafficUiTask = new Runnable() {
+        @Override public void run() {
+            updateTrafficViews();
+            if (resumed) controlHandler.postDelayed(this, 2000L);
+        }
+    };
 
     private static final class Reservation {
         final String iface;
@@ -163,12 +180,14 @@ public final class MainActivity extends Activity {
             Log.w(TAG, "TETHER_STATE_RECEIVER_UNAVAILABLE", e);
         }
         scheduleTetheringRefresh();
+        controlHandler.post(trafficUiTask);
     }
 
     @Override
     protected void onPause() {
         resumed = false;
         controlHandler.removeCallbacks(refreshTetheringTask);
+        controlHandler.removeCallbacks(trafficUiTask);
         if (tetherReceiverRegistered) {
             unregisterReceiver(tetherStateReceiver);
             tetherReceiverRegistered = false;
@@ -422,13 +441,170 @@ public final class MainActivity extends Activity {
 
     private void renderPage() {
         if (page == null) return;
+        trafficViews.clear();
+        trafficStatusView = null;
+        trafficPrepareButton = trafficStartButton = trafficStopButton = trafficRestoreButton = null;
         page.removeAllViews();
         if (activeTab == 0 && selectedClient != null) renderDeviceDetails();
         else if (activeTab == 0) renderDevicesPage();
         else renderManualPage();
     }
 
+    private void renderTrafficMode() {
+        LinearLayout box = card();
+        box.addView(label("SOFTWARE QoS · OPTIONAL", 11, true, ACCENT));
+        box.addView(label("Per-IP IPv4 speed and per-MAC rate policies. Native acceleration must be disabled, followed by a reboot. This can increase CPU use and reduce total tethering throughput.", 12, false, MUTED));
+        trafficStatusView = label("", 12, true, TEXT);
+        box.addView(trafficStatusView);
+        trafficPrepareButton = actionButton("Prepare software mode", false);
+        trafficPrepareButton.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Prepare Software QoS?")
+                .setMessage("Save the current offload settings and disable hardware/BPF acceleration. Reboot Android manually, then return and start monitoring. Only IPv4 is measured and limited; IPv6 is not limited. CPU and battery use can increase. Restore native mode here before uninstalling or clearing app data.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Prepare", (dialog, which) -> prepareTrafficMode()).show());
+        box.addView(trafficPrepareButton, new LinearLayout.LayoutParams(-1, dp(46)));
+        LinearLayout actions = row();
+        trafficStartButton = actionButton("Start monitoring", true);
+        trafficStartButton.setOnClickListener(v -> trafficServiceAction(null));
+        trafficStopButton = actionButton("Stop monitoring", false);
+        trafficStopButton.setOnClickListener(v -> trafficServiceAction(TrafficService.STOP));
+        actions.addView(trafficStartButton, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        actions.addView(trafficStopButton, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        box.addView(actions);
+        trafficRestoreButton = actionButton("Restore native mode", false);
+        trafficRestoreButton.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Restore native mode?")
+                .setMessage("Stop monitoring, remove this app's traffic filters, and restore the original offload settings. Reboot Android manually afterward. Saved rate policies will be inactive.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Restore", (dialog, which) -> trafficServiceAction(TrafficService.RESTORE)).show());
+        box.addView(trafficRestoreButton, new LinearLayout.LayoutParams(-1, dp(46)));
+        box.addView(label("Monitoring runs in a foreground service. Stop removes active limits but keeps the saved MAC policies. Speeds are interval averages, not Wi-Fi link rates.", 11, false, MUTED));
+        addPageCard(page, box);
+        updateTrafficViews();
+    }
+
+    private void prepareTrafficMode() {
+        if (trafficBusy || TrafficService.running) return;
+        trafficBusy = true;
+        updateTrafficViews();
+        Context appContext = getApplicationContext();
+        new Thread(() -> {
+            String message;
+            try {
+                TrafficMode.prepare(appContext);
+                message = "Software mode prepared. Reboot Android, enable tethering, then start monitoring.";
+            } catch (Exception error) { message = "Preparation incomplete: " + error.getMessage() + " Use Restore native mode to recover saved settings."; }
+            TrafficService.status = message;
+            runOnUiThread(() -> {
+                trafficBusy = false;
+                if (!isDestroyed() && !isFinishing()) { setStatus(TrafficService.status); updateTrafficViews(); }
+            });
+        }, "PrepareTrafficMode").start();
+    }
+
+    private void trafficServiceAction(String action) {
+        if (trafficBusy) return;
+        try {
+            if (action == null && Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 70);
+            }
+            Intent intent = new Intent(this, TrafficService.class);
+            if (action != null) intent.setAction(action);
+            TrafficService.status = action == null ? "Starting software monitor..." : "Stopping and cleaning owned traffic rules...";
+            ContextCompat.startForegroundService(this, intent);
+            updateTrafficViews();
+        } catch (Exception error) { setStatus("Traffic service could not start: " + error.getMessage()); }
+    }
+
+    private void addTrafficView(LinearLayout parent, Client client) {
+        TextView view = label(trafficText(client), 12, false, TEAL);
+        trafficViews.put(view, client);
+        parent.addView(view);
+    }
+
+    private String trafficText(Client client) {
+        TrafficEngine.Rate rate = TrafficService.rates.get(client.iface + "|" + client.mac + "|" + client.ip);
+        boolean fresh = TrafficService.running && TrafficService.sampleTime > 0L
+                && SystemClock.elapsedRealtime() - TrafficService.sampleTime <= 15000L;
+        String value = fresh && rate != null ? TrafficRules.displayRate(rate.down, rate.up)
+                : TrafficService.running ? "IPv4 rate unavailable: waiting for a fresh sample" : "IPv4 rate unavailable: monitoring stopped";
+        int[] limits = new TrafficStore(this).limits(client.mac);
+        if (limits[0] > 0 || limits[1] > 0) {
+            boolean active = fresh && rate != null && rate.downLimit == limits[0] && rate.upLimit == limits[1];
+            value += "\nLimit  Down " + limitLabel(limits[0]) + " / Up " + limitLabel(limits[1])
+                    + (active ? " · installed (IPv4)" : !TrafficService.running && !new TrafficStore(this).owned().isEmpty()
+                        ? " · kernel state unverified; use Stop to clean up" : " · saved, pending application");
+        }
+        return value;
+    }
+
+    private static String limitLabel(int kbps) {
+        return kbps == 0 ? "Unlimited" : String.format(Locale.ENGLISH, "%.3f Mbps", kbps / 1000.0);
+    }
+
+    private void updateTrafficViews() {
+        for (Map.Entry<TextView, Client> entry : trafficViews.entrySet()) entry.getKey().setText(trafficText(entry.getValue()));
+        if (trafficStatusView == null) return;
+        TrafficStore store = new TrafficStore(this);
+        trafficStatusView.setText(getString(R.string.traffic_mode_status,
+                store.prepared() ? "Software mode prepared" : "Native mode", TrafficService.status));
+        boolean available = !trafficBusy;
+        trafficPrepareButton.setEnabled(available && !store.prepared() && !TrafficService.running);
+        trafficStartButton.setEnabled(available && store.prepared() && !TrafficService.running);
+        trafficStopButton.setEnabled(available && (TrafficService.running || !store.owned().isEmpty()));
+        trafficRestoreButton.setEnabled(available && store.prepared());
+    }
+
+    private void renderTrafficPolicy(Client client) {
+        LinearLayout box = card();
+        box.addView(label("IPv4 RATE POLICY FOR THIS MAC", 10, true, ACCENT));
+        addTrafficView(box, client);
+        box.addView(label("Download/upload include local IPv4 traffic and protocol overhead. IPv6 is not measured or limited. Each current IPv4 address receives this policy. Live enforcement requires Software QoS monitoring.", 11, false, MUTED));
+        int[] limits = new TrafficStore(this).limits(client.mac);
+        box.addView(fieldLabel("DOWNLOAD LIMIT (Mbps)"));
+        EditText down = edit("Unlimited (blank), e.g. 1");
+        down.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        if (limits[0] > 0) down.setText(new java.math.BigDecimal(limits[0]).movePointLeft(3).stripTrailingZeros().toPlainString());
+        box.addView(down);
+        box.addView(fieldLabel("UPLOAD LIMIT (Mbps)"));
+        EditText up = edit("Unlimited (blank), e.g. 1");
+        up.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        if (limits[1] > 0) up.setText(new java.math.BigDecimal(limits[1]).movePointLeft(3).stripTrailingZeros().toPlainString());
+        box.addView(up);
+        box.addView(label("0.1–500 Mbps. A blank field means unlimited. A token-bucket policer allows short bursts; the average accepted rate approaches the configured limit. Policies are saved permanently by MAC.", 11, false, MUTED));
+        Button save = actionButton("Save MAC rate policy", true);
+        save.setEnabled(!busy && !controlBusy);
+        save.setOnClickListener(v -> {
+            try {
+                int downRate = TrafficRules.parseMbps(down.getText().toString());
+                int upRate = TrafficRules.parseMbps(up.getText().toString());
+                if ((downRate > 0 || upRate > 0) && !draftRemember) {
+                    throw new IllegalArgumentException("Enable Remember settings for this MAC before saving a rate limit.");
+                }
+                if (downRate > 0 || upRate > 0) deviceProfiles.save(new DeviceProfile(client.mac, draftType, client.iface, client.ip, true));
+                new TrafficStore(this).limits(client.mac, downRate, upRate);
+                setStatus("Rate policy saved for " + client.mac + ". Applied on the next monitor refresh; inactive while monitoring is stopped.");
+                renderPage();
+            } catch (Exception error) { setStatus(error.getMessage()); }
+        });
+        box.addView(save, new LinearLayout.LayoutParams(-1, dp(46)));
+        Button remove = actionButton("Remove MAC rate limits", false);
+        remove.setEnabled(!busy && !controlBusy);
+        remove.setOnClickListener(v -> {
+            try {
+                new TrafficStore(this).limits(client.mac, 0, 0);
+                down.setText(""); up.setText("");
+                setStatus("Rate policy cleared for this MAC. Active rules update on the next monitor refresh.");
+                renderPage();
+            } catch (Exception error) { setStatus(error.getMessage()); }
+        });
+        box.addView(remove, new LinearLayout.LayoutParams(-1, dp(46)));
+        addPageCard(page, box);
+    }
+
     private void renderDevicesPage() {
+        renderTrafficMode();
         LinearLayout titleRow = row();
         titleRow.addView(label("Detected devices", 19, true, TEXT),
                 new LinearLayout.LayoutParams(0, -2, 1f));
@@ -579,6 +755,7 @@ public final class MainActivity extends Activity {
                 ? DeviceProfile.Type.UNKNOWN.label : profile.type.label), 12, false, MUTED));
         box.addView(label("MAC  " + client.mac, 13, false, MUTED));
         box.addView(label("Neighbor state  ·  " + client.state, 11, false, MUTED));
+        addTrafficView(box, client);
         if (saved != null) {
             box.addView(label("Locked IP  ·  " + saved.ip, 12, true, ACCENT));
         }
@@ -682,6 +859,7 @@ public final class MainActivity extends Activity {
         detailRow(identity, "IP assignment", reservation == null ? "Dynamic DHCP" : "Locked to " + reservation.ip);
         identity.addView(label("The IP is a neighbor-cache or saved record and can be outdated. Settings target the selected MAC, not another device reusing that IP.", 11, false, MUTED));
         addPageCard(page, identity);
+        renderTrafficPolicy(client);
 
         LinearLayout metadata = card();
         metadata.addView(label("ANDROID DEVICE DATA", 10, true, MUTED));
@@ -730,10 +908,11 @@ public final class MainActivity extends Activity {
         remember.setText(R.string.remember_device_settings);
         remember.setTextColor(TEXT);
         remember.setChecked(draftRemember);
-        remember.setEnabled(!busy);
+        int[] rememberedLimits = new TrafficStore(this).limits(client.mac);
+        remember.setEnabled(!busy && rememberedLimits[0] == 0 && rememberedLimits[1] == 0);
         remember.setOnCheckedChangeListener((button, checked) -> draftRemember = checked);
         profile.addView(remember);
-        profile.addView(label("Unchecked: the type lasts for this app process only. Android Wi-Fi blocks always persist until unblocked or reset.", 11, false, MUTED));
+        profile.addView(label("Unchecked: the type lasts for this app process only. Wi-Fi blocks and rate policies are permanent; remove a rate policy before making its profile temporary.", 11, false, MUTED));
         Button save = actionButton("Save device profile", true);
         save.setEnabled(!busy);
         save.setOnClickListener(v -> saveDeviceProfile(client, blocked));
@@ -760,9 +939,7 @@ public final class MainActivity extends Activity {
             access.addView(label("Individual USB client blocking is not available in this release.", 12, false, MUTED));
         }
         detailRow(access, "Per-device data usage", "Unavailable");
-        detailRow(access, "Current per-device Internet speed", "Unavailable");
-        detailRow(access, "Speed limit / data quota", "Not implemented");
-        access.addView(label("Reliable per-client traffic statistics and limits are not exposed by the Android path used here. These controls are skipped.", 11, false, MUTED));
+        detailRow(access, "Data quota", "Not implemented");
         addPageCard(page, access);
 
         Button reset = actionButton("Reset this device to defaults", false);
@@ -772,7 +949,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(-1, dp(48));
         resetParams.topMargin = dp(10);
         page.addView(reset, resetParams);
-        page.addView(label("Reset removes this MAC's profile and any Wi-Fi block, and returns its selected-interface reservation to dynamic DHCP. Other devices and other-interface IP reservations are kept.", 11, false, MUTED));
+        page.addView(label("Reset removes this MAC's profile, rate policy and Wi-Fi block, and returns its selected-interface reservation to dynamic DHCP. Other devices and other-interface IP reservations are kept.", 11, false, MUTED));
     }
 
     private void detailRow(LinearLayout parent, String name, String value) {
@@ -796,6 +973,10 @@ public final class MainActivity extends Activity {
                 throw new IllegalStateException("Refresh the native Wi-Fi block state before removing a permanent profile.");
             }
             DeviceProfile.requireRememberedBlock(blocked, draftRemember);
+            int[] limits = new TrafficStore(this).limits(client.mac);
+            if (!draftRemember && (limits[0] > 0 || limits[1] > 0)) {
+                throw new IllegalStateException("Remove the saved rate policy before making this profile temporary.");
+            }
             deviceProfiles.save(new DeviceProfile(client.mac, draftType, client.iface, client.ip, draftRemember));
             setStatus(draftRemember ? "Device profile saved permanently by MAC." : "Device type saved for this app process only.");
             renderPage();
@@ -835,7 +1016,7 @@ public final class MainActivity extends Activity {
     private void confirmDeviceReset(Client client) {
         new AlertDialog.Builder(this)
                 .setTitle("Reset selected device?")
-                .setMessage("Remove the profile and any Wi-Fi block for " + client.mac + ", and release its "
+                .setMessage("Remove the profile, rate policy and Wi-Fi block for " + client.mac + ", and release its "
                         + client.iface + " IP reservation? Other MAC addresses and other-interface reservations are kept.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Reset", (dialog, which) -> resetDevice(client))
@@ -859,6 +1040,8 @@ public final class MainActivity extends Activity {
     }
 
     private void finishDeviceReset(Client client) {
+        try { new TrafficStore(this).limits(client.mac, 0, 0); }
+        catch (Exception error) { setStatus("Reset stopped: " + error.getMessage()); renderPage(); return; }
         removeReservation(client.iface, client.mac);
         saveReservations("Selected device defaults restored. Renew DHCP to release the old address.", () -> {
             deviceProfiles.remove(client.mac);

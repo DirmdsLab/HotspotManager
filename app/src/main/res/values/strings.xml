@@ -1,3 +1,4 @@
 <resources>
     <string name="remember_device_settings">Remember settings for this MAC</string>
+    <string name="traffic_mode_status">%1$s\n%2$s</string>
 </resources>
