@@ -7,36 +7,31 @@ plugins {
 val releasePropertiesFile = rootProject.file("../key/keystore.properties")
 val releaseKeystoreFile = rootProject.file("../key/infinix-hotspot-release.jks")
 
+// Local release credentials are optional so source archives remain buildable.
+val hasReleaseSigning = releasePropertiesFile.isFile || releaseKeystoreFile.isFile
 val releaseProperties = Properties().apply {
-    if (!releasePropertiesFile.isFile) {
-        throw GradleException("Keystore properties file not found: ${releasePropertiesFile.absolutePath}")
+    if (hasReleaseSigning) {
+        require(releasePropertiesFile.isFile && releaseKeystoreFile.isFile) {
+            "Release signing requires both ../key/keystore.properties and ../key/infinix-hotspot-release.jks"
+        }
+        releasePropertiesFile.inputStream().use { load(it) }
+        for (name in listOf("storePassword", "keyPassword", "keyAlias")) {
+            require(!getProperty(name).isNullOrBlank()) { "Missing release signing property: $name" }
+        }
     }
-    releasePropertiesFile.inputStream().use { input ->
-        load(input)
-    }
-}
-
-val releaseStorePassword = releaseProperties.getProperty("storePassword")
-    ?: throw GradleException("Missing storePassword")
-val releaseKeyPassword = releaseProperties.getProperty("keyPassword")
-    ?: throw GradleException("Missing keyPassword")
-val releaseKeyAlias = releaseProperties.getProperty("keyAlias")
-    ?: throw GradleException("Missing keyAlias")
-
-if (!releaseKeystoreFile.isFile) {
-    throw GradleException("Release keystore not found: ${releaseKeystoreFile.absolutePath}")
 }
 
 android {
     namespace = "uwu.waguri.hotspotmanager"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "uwu.waguri.hotspotmanager"
         minSdk = 29
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.6.7"
+        versionCode = 18
+        versionName = "0.6.8"
     }
 
     compileOptions {
@@ -44,18 +39,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = releaseKeystoreFile
-            storePassword = releaseStorePassword
-            keyAlias = releaseKeyAlias
-            keyPassword = releaseKeyPassword
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseProperties.getProperty("storePassword")
+                keyAlias = releaseProperties.getProperty("keyAlias")
+                keyPassword = releaseProperties.getProperty("keyPassword")
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
             // Keep reflective Xposed hook entry points and target methods intact.
             isMinifyEnabled = false
             isDebuggable = false
@@ -72,4 +69,5 @@ android {
 dependencies {
     implementation("androidx.core:core:1.15.0")
     compileOnly("io.github.libxposed:api:102.0.0")
+    testImplementation("junit:junit:4.13.2")
 }

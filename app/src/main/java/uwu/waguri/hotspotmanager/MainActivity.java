@@ -35,8 +35,8 @@ import java.util.List;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
-    private static final String TAG = "InfinixHotspotUI";
-    private static final String CONFIG_KEY = "infinix_hotspot_reservations_v1";
+    private static final String TAG = "WaguriHotspotUI";
+    private static final String CONFIG_KEY = "waguri_hotspot_reservations_v1";
     private static final String WIFI_IFACE = "ap0";
     private static final String USB_IFACE = "rndis0";
 
@@ -108,7 +108,7 @@ public final class MainActivity extends Activity {
         TextView message = new TextView(this);
         message.setText("Hotspot Manager could not load the interface.\n\n"
                 + error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage())
-                + "\n\nCheck logcat with the InfinixHotspotUI tag for details.");
+                + "\n\nCheck logcat with the WaguriHotspotUI tag for details.");
         message.setTextColor(TEXT);
         message.setTextSize(14);
         message.setPadding(dp(24), dp(32), dp(24), dp(32));
@@ -379,6 +379,7 @@ public final class MainActivity extends Activity {
 
         Button save = actionButton("Save reservation", true);
         save.setOnClickListener(v -> {
+            if (isOperationInProgress()) return;
             String chosenMac;
             String chosenIface;
             if (mode.getSelectedItemPosition() == 0) {
@@ -447,6 +448,7 @@ public final class MainActivity extends Activity {
         LinearLayout actions = row();
         Button update = actionButton("Update IP", true);
         update.setOnClickListener(v -> {
+            if (isOperationInProgress()) return;
             String nextIp = target.getText().toString().trim();
             if (!isValidStaticIp(r.iface, nextIp)) {
                 setStatus("Invalid IP address for " + r.iface + ".");
@@ -467,6 +469,7 @@ public final class MainActivity extends Activity {
         Button delete = actionButton("Delete", false);
         delete.setTextColor(RED);
         delete.setOnClickListener(v -> {
+            if (isOperationInProgress()) return;
             removeReservation(r.iface, r.mac);
             saveReservations("Reservation deleted. This MAC will use dynamic DHCP again.");
         });
@@ -484,6 +487,7 @@ public final class MainActivity extends Activity {
     }
 
     private void lockCurrentIp(Client client) {
+        if (isOperationInProgress()) return;
         if (!isValidStaticIp(client.iface, client.ip)) {
             setStatus("The current IP address is invalid for this interface.");
             return;
@@ -498,8 +502,15 @@ public final class MainActivity extends Activity {
     }
 
     private void makeDynamic(Client client) {
+        if (isOperationInProgress()) return;
         removeReservation(client.iface, client.mac);
         saveReservations("Reservation for " + client.mac + " removed. The client will use dynamic DHCP.");
+    }
+
+    private boolean isOperationInProgress() {
+        if (!busy) return false;
+        setStatus("Please wait for the current operation to finish.");
+        return true;
     }
 
     private void refreshAll() {

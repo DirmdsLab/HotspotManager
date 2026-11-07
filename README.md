@@ -1,251 +1,198 @@
-# Hotspot Manager v0.6.7
+# Hotspot Manager 0.6.8
 
-Target device and software:
-- Infinix X1101B
-- Android 16 / SDK 36
-- Magisk 31.1
-- Vector 2.2
-- Wi-Fi downstream interface: `ap0`
-- USB downstream interface: `rndis0`
+A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
+networks and live DHCP reservations. Intended device: Infinix with MediaTek
+Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
+Tethering and NetworkStack class layout used by this project.
 
-## v0.6.7 changes
+## USB-first startup fix
 
-### Release build and UI deprecation cleanup
-- Added an explicit non-debuggable `release` build type with code shrinking disabled
-  so reflective Xposed hook entry points are not renamed or removed.
-- Replaced deprecated platform window-insets accessors with AndroidX
-  `WindowInsetsCompat` while preserving the same system-bars padding behavior.
-- Removed redundant legacy system-UI and system-bar color calls; the existing
-  `AppTheme` remains the source of the same status/navigation bar colors and icon style.
-- No changes were made to the runtime tethering, upstream recovery, DNS, gateway,
-  DHCP, MAC reservation, or static-IP logic.
+The previous recovery hook looked up `handleInterfaceServingStateActive` on
+`Tethering`. In AOSP Android 16, this method is declared on the inner
+`Tethering$TetherMainSM` class, so the old hook could fail to install before
+queuing any recovery message.
 
-## v0.6.3 changes
+Version 0.6.8:
 
-### USB upstream startup recovery
-- Added a hook for the moment Android marks `rndis0` as actively tethered.
-- The module queues one native `CMD_RETRY_UPSTREAM` message after 2.5 seconds
-  on Android Tethering's own state-machine handler.
-- This asks Android to re-evaluate its selected upstream and reapply the
-  downstream forwarding and upstream DNS-forwarder state through the normal
-  Tethering code path.
-- Added `UPSTREAM_SELECTION` diagnostics so the selected upstream network and
-  downstream interface set can be inspected.
-- This is a runtime recovery trigger; it does not rewrite Android's routing
-  tables or replace the Tethering implementation.
+- Hooks the active and inactive downstream methods on `TetherMainSM`.
+- Sends the native `CMD_RETRY_UPSTREAM` message through that state machine's
+  own handler. Android performs upstream selection and DNS-forwarder setup.
+- Performs one refresh 2.5 seconds after USB becomes tethered, even when an
+  upstream is already selected. If upstream network/interface selection is
+  still unavailable, retries at 5 and 10 seconds, then stops.
+- Cancels pending callbacks when that USB downstream stops. Duplicate active
+  notifications do not create additional retry sequences.
+- Deoptimizes the native serving-state callers so compiled call sites can
+  reach the hooks.
+- Keeps DHCP option 6 independent of gateway replacement and preserves the
+  native DHCP parameters if DNS patching fails.
+- Allows the fixed gateway when network enumeration succeeds but no upstream
+  IPv4 address exists yet. An absent upstream is not a subnet conflict;
+  detected overlaps and enumeration failures still use Android's address.
 
-### USB and Wi-Fi DHCP DNS
-- The DHCP DNS hook now applies to recognized downstream interfaces even if
-  the gateway-address hook has not marked that interface as successfully
-  patched yet.
-- DHCP option 6 continues to advertise `1.1.1.1` and `8.8.8.8` on both `ap0`
-  and `rndis0`.
-- The DHCP DNS change does not by itself restore upstream connectivity. If a
-  client cannot ping a public IP address, investigate upstream selection,
-  forwarding, and NAT before treating the problem as DNS-only.
+This fixes a verified hook-target error in the source. It has not been tested
+on the physical Infinix firmware. OEM class or signature changes are reported
+by the hook-installation logs rather than silently treated as success.
 
-### App language
-- All user-facing app text is now English.
-- Source-code comments are written in English.
+AOSP reference:
+https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/android16-release/Tethering/src/com/android/networkstack/tethering/Tethering.java
 
-## Retained network configuration
+## Efficiency and maintenance
+
+- Cache parsed reservation snapshots by exact Settings.Global content and
+  interface. Configuration changes remain live; clearing settings invalidates
+  cached reservations. Unchanged invalid JSON is not repeatedly parsed/logged.
+- Resolve DNS parcel fields and USB hook reflection once during installation.
+- Prevent reservation changes while another refresh/save is in progress.
+- Make private release-signing files optional, so the source package can build
+  without the original developer's keystore.
+- Include a Gradle wrapper with a pinned distribution checksum and deterministic
+  unit tests for USB recovery.
+- Guard the API 33 public `IpPrefix` constructor while retaining the existing
+  hidden-constructor path for older scoped Android processes.
+
+All application text, source comments, and documentation are in English.
+
+## Network configuration
 
 | Interface | Gateway | Subnet | Dynamic pool |
 |---|---|---|---|
 | Wi-Fi `ap0` | `192.168.77.1` | `192.168.77.0/24` | `.100-.200` |
 | USB `rndis0` | `192.168.78.1` | `192.168.78.0/24` | `.100-.200` |
 
-DHCP clients are offered:
-- Primary DNS: `1.1.1.1`
-- Secondary DNS: `8.8.8.8`
+DHCP advertises `1.1.1.1` and `8.8.8.8`. Gateway replacement is skipped when a
+conflicting interface subnet is detected. Public resolvers still require a
+working upstream and packet forwarding; a successful DHCP hook alone does not
+prove Internet reachability.
 
-## DHCP reservation configuration
-
-Reservations remain stored in `Settings.Global` under:
-
-`infinix_hotspot_reservations_v1`
-
-The existing JSON schema remains compatible:
+Reservations are stored in `Settings.Global` under
+`waguri_hotspot_reservations_v1`:
 
 ```json
 {
   "version": 2,
-  "reservations": []
+  "reservations": [
+    {"iface": "rndis0", "mac": "02:11:22:33:44:55", "ip": "192.168.78.10"}
+  ]
 }
 ```
 
-Changing a reservation in the app does not require recompiling the app or
-rebooting Android. The client must renew DHCP or reconnect to receive the new
-address.
+The example MAC is illustrative; no reservation is installed by default.
+Reserved addresses can be `.2-.254`, including addresses inside the dynamic
+pool. A client must renew DHCP or reconnect after its reservation changes.
 
-## Release build
+## Included release artifact
 
-The release variant is non-debuggable and keeps minification disabled to protect
-reflection-based Xposed hooks. No release keystore is included in this source
-package, so Gradle produces an unsigned release APK unless you configure your
-own release signing key.
+The fixed source distribution includes
+`artifacts/HotspotManager-0.6.8-unsigned.apk`. Sign it before installation using
+the instructions below. `VALIDATION.md` records the completed checks and their
+limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 
-Build the release variant:
+## Build
+
+Requirements: JDK 17 or newer, Android SDK platform 36, Android build tools,
+and network access for Gradle dependencies.
 
 ```bash
-gradle :app:clean :app:assembleRelease
+./gradlew :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
 ```
 
-Unsigned output:
+Without signing credentials, the release output is:
 
 `app/build/outputs/apk/release/app-release-unsigned.apk`
 
-To install on a device, sign the APK with your own persistent release keystore
-using Android Studio's **Build > Generate Signed Bundle / APK** or `apksigner`,
-then install the signed APK. For example:
-
-```bash
-apksigner sign --ks my-release-key.jks \
-  --out app-release.apk app-release-unsigned.apk
-apksigner verify --verbose app-release.apk
-adb install -r app-release.apk
-```
-
-Keep the same keystore for all future updates.
-A release APK signed with a different key cannot update an installation signed
-with the previous key. If the currently installed v0.6.3 app was installed from
-a debug build, it must be signed with the matching debug key to update in place;
-otherwise Android requires uninstalling the old package first.
-
-Keep Vector scope enabled for:
-- `com.android.networkstack`
-- `com.android.networkstack.tethering`
-
-Grant root permission to Hotspot Manager.
-
-After installing the v0.6.7 APK, reboot once so the Xposed hook code is loaded
-cleanly into the NetworkStack and Tethering processes.
-Do not remove the currently working Magisk module before verifying the update.
-
-## USB-first test procedure
-
-1. Reboot Android after installing the updated app.
-2. Leave the Wi-Fi hotspot disabled.
-3. Connect the PC using USB tethering only.
-4. Wait approximately 10 seconds.
-5. On the PC, test the gateway and public IP:
-
-```bash
-ping -c 3 192.168.78.1
-ping -c 3 1.1.1.1
-```
-
-6. Test DNS directly:
-
-```bash
-dig @1.1.1.1 google.com +time=2 +tries=1
-dig @8.8.8.8 google.com +time=2 +tries=1
-```
-
-7. If the first USB session still has no Internet, collect the Android logs
-   before enabling the Wi-Fi hotspot:
-
-```bash
-adb logcat -c
-```
-
-Enable USB tethering, wait 10 seconds, then run:
-
-```bash
-adb logcat -d -s InfinixHotspotPatch:I '*:S' | grep -E \
-'GATEWAY_|DNS_|USB_UPSTREAM_|UPSTREAM_SELECTION|DHCP_|RUNTIME_CONFIG'
-```
-
-Also collect:
-
-```bash
-adb shell su -c 'dumpsys tethering'
-adb shell su -c 'ip -4 addr show rndis0; ip route'
-adb shell su -c 'ip rule show'
-```
-
-## Interpreting the test
-
-- If `ping 192.168.78.1` fails, investigate the USB downstream interface,
-  address assignment, or local link first.
-- If the gateway responds but `ping 1.1.1.1` fails, the problem is upstream
-  selection, forwarding, or NAT; changing DNS servers will not fix it.
-- If `ping 1.1.1.1` works but `dig @1.1.1.1` fails, investigate DNS packet
-  forwarding or client DNS configuration.
-- `DNS_DHCP_FIXED iface=rndis0` confirms the DHCP parameter hook ran. It does
-  not prove that the PC received the DHCP option or that public DNS is reachable.
-- `USB_UPSTREAM_RETRY_QUEUED` confirms that the recovery message was queued.
-  `UPSTREAM_SELECTION` shows the upstream Android selected when the message
-  was processed.
-
-## Rollback
-
-Keep the last known-working APK and Magisk module available. If the new build
-causes tethering to stop, disable the Vector module and restore the last
-known-working version before continuing.
-
-
-## v0.6.7 changes
-
-- Removed the two hardcoded PC MAC/IP reservations. A fresh configuration now starts empty.
-- Runtime DHCP reservation lookup returns no static entries when Settings.Global is empty.
-- Added an explicit root UID check to device refresh and configuration writes.
-- The UI reports when Magisk Superuser access has not been granted.
-- Manual target IP input starts blank; the interface-specific subnet is shown as a hint.
-- The tethering, upstream recovery, gateway, DNS, and DHCP hook implementation is otherwise unchanged.
-
-## Release signing
-
-The release build reads the signing key from the sibling `/workspace/key` folder:
+To reuse the original release-signing workflow, provide both sibling files:
 
 - `../key/infinix-hotspot-release.jks`
 - `../key/keystore.properties`
 
-Do not commit the keystore or properties file to source control.
+Properties must define `storePassword`, `keyPassword`, and `keyAlias`. No
+private keystore or passwords are included. If either local signing file is
+present, both files and all properties must be valid.
 
+Alternatively, sign the unsigned release with your existing key:
 
-## v0.6.7 package identity
+```bash
+apksigner sign --ks my-release-key.jks --out app-release.apk \
+  app/build/outputs/apk/release/app-release-unsigned.apk
+apksigner verify --verbose app-release.apk
+adb install -r app-release.apk
+```
 
-- Application ID and namespace: `uwu.waguri.hotspotmanager`
-- Launcher label: `Hotspot Manager`
-- Xposed entry point: `uwu.waguri.hotspotmanager.HotspotProbe`
-- The Wi-Fi/USB tethering, DHCP, DNS, reservation, and upstream-recovery implementation
-  is carried forward from the working v0.6.5 source without intentional behavior changes.
-- This package ID is different from the old `dev.infinix.hotspotprobe` package. Android
-  treats it as a separate app; install it alongside the old app first, then enable its
-  module entry in Vector and grant it root access in Magisk.
+Use the same signing key as the installed app to update it in place. Android
+rejects an update signed with a different key. Keep the current APK and export
+reservations before uninstalling anything.
 
+## Install and enable
 
-## v0.6.7 naming correction
+1. Install the signed APK with application ID `uwu.waguri.hotspotmanager`.
+2. Enable Hotspot Manager in Vector and keep both scopes enabled:
+   `com.android.networkstack` and `com.android.networkstack.tethering`.
+3. Grant Hotspot Manager root permission in Magisk for reading clients and
+   saving reservations.
+4. Reboot once so the new hook code is loaded into the tethering processes.
+5. Leave Wi-Fi hotspot disabled and test USB tethering first.
 
-- Launcher and in-app display name: `Hotspot Manager`.
-- Application ID and namespace remain `uwu.waguri.hotspotmanager`.
-- The runtime tethering and DHCP implementation is unchanged from v0.6.6.
+The root permission serves app configuration access. Hook execution depends
+on Vector loading the module in the scoped processes.
 
+## Device validation
 
+After reboot, connect mobile data or an upstream Wi-Fi network, leave Wi-Fi
+hotspot disabled, and enable USB tethering. Wait 10 seconds.
 
-SETUP
+On Windows:
 
+```bat
+ping 192.168.78.1
+ping 1.1.1.1
+nslookup example.com 1.1.1.1
+nslookup example.com 8.8.8.8
+nslookup example.com
+```
 
-…/HotspotManager
-0s ❯ podman run -it \                                                                                 12:04
-           --name infinix-hotspot-build \
-           -v "/home/tutturuu/File/Code/DirmdsLab/HotspotManager:/workspace/HotspotManager:Z" \
-           -v "/home/tutturuu/File/Software/App/env/Android/Key-HotspotManager:/workspace/key:Z" \
-           -w /workspace \
-           ghcr.io/cirruslabs/android-sdk:36 \
-           bash
+On Linux/macOS:
 
-apt-get update && apt-get install -y wget unzip
+```bash
+ping -c 3 192.168.78.1
+ping -c 3 1.1.1.1
+dig @1.1.1.1 example.com +time=2 +tries=1
+dig @8.8.8.8 example.com +time=2 +tries=1
+```
 
-wget https://services.gradle.org/distributions/gradle-8.13-bin.zip \
-  -O /tmp/gradle.zip
+Also test USB off/on, hotspot-first then USB, both active with hotspot stopped,
+and USB enabled before mobile data becomes available. Android's native network
+callbacks continue handling connectivity changes after the bounded retries end.
 
-unzip -q /tmp/gradle.zip -d /opt
+Interpretation:
 
-ln -sf /opt/gradle-8.13/bin/gradle /usr/local/bin/gradle
+- Gateway unreachable: check the USB link and client address assignment.
+- Public IP unreachable: check upstream selection, forwarding, and NAT.
+- Public IP reachable but DNS queries fail: inspect DNS forwarding and DHCP
+  option 6; verify the DNS servers actually received by the client.
+- `USB_UPSTREAM_RECOVERY_HOOK_INSTALLED` confirms hook registration.
+- `USB_UPSTREAM_RETRY_QUEUED ... queued=true` confirms a pending callback.
+- `USB_UPSTREAM_RETRY_SENT ... queued=true` confirms a native retry was sent.
+- `UPSTREAM_SELECTION` records the selected upstream network and interfaces.
+- `DNS_DHCP_FIXED iface=rndis0` confirms the DHCP DNS parcel was patched.
 
+If a test fails, collect logs before enabling the hotspot:
 
+```bash
+adb logcat -d -s WaguriHotspotPatch:I '*:S'
+adb shell "su -c 'dumpsys tethering'"
+adb shell "su -c 'ip -4 addr show rndis0; ip route; ip rule show'"
+```
 
+Do not clear logcat after reproducing the failure. Capture the first-session
+logs and the failing client commands together.
 
-gradle clean :app:assembleRelease
+## Automated coverage
+
+`UsbUpstreamRecoveryTest` exercises bounded USB-first retry timing, an already
+selected upstream, delayed upstream availability, duplicate notifications,
+USB shutdown, unrelated Wi-Fi shutdown, rapid reconnects, replacement
+interfaces, rejected scheduling, and cancellation during a retry callback.
+
+These tests validate retry lifecycle behavior. They do not emulate Vector's
+runtime method interception, the vendor modem, NAT, or actual DNS traffic.

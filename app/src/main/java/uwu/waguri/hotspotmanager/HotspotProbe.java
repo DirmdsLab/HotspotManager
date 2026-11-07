@@ -5,6 +5,7 @@ import android.net.LinkAddress;
 import android.net.MacAddress;
 import android.content.Context;
 import android.provider.Settings;
+import android.os.Build;
 import android.os.Handler;
 import android.util.Log;
 
@@ -22,6 +23,7 @@ import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,7 +31,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class HotspotProbe extends XposedModule {
-    private static final String TAG = "InfinixHotspotPatch";
+    private static final String TAG = "WaguriHotspotPatch";
 
     private static final String TETHER_PKG = "com.android.networkstack.tethering";
     private static final String STACK_PKG = "com.android.networkstack";
@@ -38,10 +40,21 @@ public final class HotspotProbe extends XposedModule {
     private static final String LEASE_REPOSITORY =
             "com.android.networkstack.android.net.dhcp.DhcpLeaseRepository";
 
-    private static final String CONFIG_KEY = "infinix_hotspot_reservations_v1";
+    private static final String CONFIG_KEY = "waguri_hotspot_reservations_v1";
     private static volatile Context cachedContext;
-    private static final ConcurrentHashMap<String, String> LAST_CONFIG_SIGNATURES =
+    private static final ConcurrentHashMap<String, ReservationSnapshot> RESERVATION_CACHE =
             new ConcurrentHashMap<>();
+    private final UsbUpstreamRecovery usbRecovery = new UsbUpstreamRecovery();
+
+    private static final class ReservationSnapshot {
+        final String raw;
+        final Map<String, Integer> reservations;
+
+        ReservationSnapshot(String raw, Map<String, Integer> reservations) {
+            this.raw = raw;
+            this.reservations = Collections.unmodifiableMap(new HashMap<>(reservations));
+        }
+    }
 
     private static final int TARGET_MASK = 0xFFFFFF00;
     private static final int POOL_START = 100;
@@ -103,37 +116,99 @@ public final class HotspotProbe extends XposedModule {
     }
 
     /**
-     * Re-evaluate Android's upstream selection shortly after USB tethering becomes active.
-     *
-     * The retry uses Tethering's own CMD_RETRY_UPSTREAM message on its state-machine
-     * handler. This lets Android reselect the upstream and reapply forwarding and
-     * DNS-forwarder state without restarting the tethering service.
+     * Recover USB-first startup through Android's own upstream-selection state machine.
+     * All callbacks run on the native state-machine handler.
      */
     private void installUsbUpstreamRecoveryHook(ClassLoader loader) {
         try {
             Class<?> tetheringClass = Class.forName(
                     "com.android.networkstack.tethering.Tethering", false, loader);
+            Class<?> stateMachineClass = Class.forName(
+                    "com.android.networkstack.tethering.Tethering$TetherMainSM", false, loader);
             Class<?> ipServerClass = Class.forName(IP_SERVER, false, loader);
 
-            Method servingActive = tetheringClass.getDeclaredMethod(
+            // These methods belong to TetherMainSM, not the outer Tethering class.
+            Method servingActive = stateMachineClass.getDeclaredMethod(
                     "handleInterfaceServingStateActive", int.class, ipServerClass);
+            Method servingInactive = stateMachineClass.getDeclaredMethod(
+                    "handleInterfaceServingStateInactive", ipServerClass);
+            Method interfaceName = ipServerClass.getDeclaredMethod("interfaceName");
+            Method getHandler = stateMachineClass.getMethod("getHandler");
+            Field retryField = stateMachineClass.getDeclaredField("CMD_RETRY_UPSTREAM");
+            Field outerField = stateMachineClass.getDeclaredField("this$0");
+            Field upstreamField = tetheringClass.getDeclaredField("mTetherUpstream");
+            Field upstreamIfacesField = tetheringClass.getDeclaredField("mCurrentUpstreamIfaceSet");
             servingActive.setAccessible(true);
+            servingInactive.setAccessible(true);
+            interfaceName.setAccessible(true);
+            getHandler.setAccessible(true);
+            retryField.setAccessible(true);
+            outerField.setAccessible(true);
+            upstreamField.setAccessible(true);
+            upstreamIfacesField.setAccessible(true);
+            final int retryMessage = retryField.getInt(null);
+            final int tetheredMode = getStaticInt(ipServerClass, "STATE_TETHERED", 2);
+
+            hook(servingInactive).intercept(chain -> {
+                Object result = chain.proceed();
+                usbRecovery.stop(chain.getArg(0));
+                return result;
+            });
 
             hook(servingActive).intercept(chain -> {
                 Object result = chain.proceed();
-
-                int mode = (Integer) chain.getArg(0);
                 Object ipServer = chain.getArg(1);
-                String iface = getInterfaceName(ipServerClass, ipServer);
-                int tetheredMode = getStaticInt(ipServerClass, "STATE_TETHERED", 2);
+                // Module failures must never escape into the native tethering state machine.
+                try {
+                    if (!USB.iface.equals(interfaceName.invoke(ipServer))) return result;
+                    if ((Integer) chain.getArg(0) != tetheredMode) {
+                        usbRecovery.stop(ipServer);
+                        return result;
+                    }
 
-                if ("rndis0".equals(iface) && mode == tetheredMode) {
-                    scheduleUsbUpstreamRetry(
-                            chain.getThisObject(), tetheringClass, loader);
+                    Object stateMachine = chain.getThisObject();
+                    Object tethering = outerField.get(stateMachine);
+                    Object handlerValue = getHandler.invoke(stateMachine);
+                    if (!(handlerValue instanceof Handler)) {
+                        Log.w(TAG, "USB_UPSTREAM_RETRY_SKIPPED handlerUnavailable=true");
+                        return result;
+                    }
+                    Handler handler = (Handler) handlerValue;
+                    UsbUpstreamRecovery.Scheduler scheduler = new UsbUpstreamRecovery.Scheduler() {
+                        @Override
+                        public boolean postDelayed(Runnable task, long delayMs) {
+                            boolean queued = handler.postDelayed(task, delayMs);
+                            Log.i(TAG, "USB_UPSTREAM_RETRY_QUEUED iface=rndis0 delayMs="
+                                    + delayMs + " queued=" + queued);
+                            return queued;
+                        }
+
+                        @Override
+                        public void removeCallbacks(Runnable task) {
+                            handler.removeCallbacks(task);
+                        }
+                    };
+                    usbRecovery.start(stateMachine, ipServer, scheduler, attempt -> {
+                        boolean queued = handler.sendEmptyMessage(retryMessage);
+                        Log.i(TAG, "USB_UPSTREAM_RETRY_SENT iface=rndis0 attempt="
+                                + attempt + " queued=" + queued);
+                    }, () -> {
+                        try {
+                            return upstreamField.get(tethering) != null
+                                    && upstreamIfacesField.get(tethering) != null;
+                        } catch (ReflectiveOperationException e) {
+                            Log.w(TAG, "USB_UPSTREAM_STATE_READ_FAILED", e);
+                            return false;
+                        }
+                    });
+                } catch (Throwable t) {
+                    Log.e(TAG, "USB_UPSTREAM_RETRY_SCHEDULE_FAILED", t);
                 }
                 return result;
             });
 
+            // Private-method callers may already have been compiled before hook installation.
+            deoptimizeServingStateCallers(stateMachineClass);
             Log.i(TAG, "USB_UPSTREAM_RECOVERY_HOOK_INSTALLED " + servingActive);
         } catch (Throwable t) {
             Log.e(TAG, "USB_UPSTREAM_RECOVERY_HOOK_INSTALL_FAILED", t);
@@ -142,29 +217,17 @@ public final class HotspotProbe extends XposedModule {
         installUpstreamSelectionDiagnostics(loader);
     }
 
-    private void scheduleUsbUpstreamRetry(
-            Object tethering, Class<?> tetheringClass, ClassLoader loader) {
-        try {
-            Field handlerField = tetheringClass.getDeclaredField("mHandler");
-            handlerField.setAccessible(true);
-            Object value = handlerField.get(tethering);
-            if (!(value instanceof Handler)) {
-                Log.w(TAG, "USB_UPSTREAM_RETRY_SKIPPED handlerUnavailable=true");
-                return;
+    private void deoptimizeServingStateCallers(Class<?> stateMachineClass) {
+        for (Class<?> nested : stateMachineClass.getDeclaredClasses()) {
+            if (!"InitialState".equals(nested.getSimpleName())
+                    && !"TetherModeAliveState".equals(nested.getSimpleName())) continue;
+            try {
+                Method processMessage = nested.getDeclaredMethod(
+                        "processMessage", android.os.Message.class);
+                deoptimize(processMessage);
+            } catch (Throwable t) {
+                Log.w(TAG, "USB_UPSTREAM_CALLER_DEOPTIMIZE_SKIPPED class=" + nested.getName(), t);
             }
-
-            Class<?> stateMachineClass = Class.forName(
-                    "com.android.networkstack.tethering.Tethering$TetherMainSM",
-                    false, loader);
-            Field retryField = stateMachineClass.getDeclaredField("CMD_RETRY_UPSTREAM");
-            retryField.setAccessible(true);
-            int retryMessage = retryField.getInt(null);
-
-            Handler handler = (Handler) value;
-            boolean queued = handler.sendEmptyMessageDelayed(retryMessage, 2500L);
-            Log.i(TAG, "USB_UPSTREAM_RETRY_QUEUED iface=rndis0 delayMs=2500 queued=" + queued);
-        } catch (Throwable t) {
-            Log.e(TAG, "USB_UPSTREAM_RETRY_SCHEDULE_FAILED", t);
         }
     }
 
@@ -245,7 +308,7 @@ public final class HotspotProbe extends XposedModule {
                 if (config == null) return original;
 
                 LinkAddress originalAddress = (LinkAddress) original;
-                String originalPrefix = new IpPrefix(
+                String originalPrefix = createIpPrefix(
                         originalAddress.getAddress(),
                         originalAddress.getPrefixLength()).toString();
                 ORIGINAL_PREFIXES.put(iface, originalPrefix);
@@ -273,52 +336,31 @@ public final class HotspotProbe extends XposedModule {
         }
     }
 
-    /**
-     * Advertise public DNS resolvers to IPv4 DHCP clients on ap0 and rndis0.
-     *
-     * Preserve the default router and replace only DHCP option 6. This hook is
-     * independent of the gateway-address hook so DNS is still advertised if
-     * gateway replacement is skipped by the prefix-conflict guard.
-     */
+    /** Advertise public DNS through DHCP option 6 without changing the default router. */
     private void installDnsHook(ClassLoader loader) {
         try {
             Class<?> ipServerClass = Class.forName(IP_SERVER, false, loader);
             Method makeServingParams = ipServerClass.getDeclaredMethod(
-                    "makeServingParams",
-                    Inet4Address.class,
-                    Inet4Address.class,
-                    LinkAddress.class,
-                    Inet4Address.class);
+                    "makeServingParams", Inet4Address.class, Inet4Address.class,
+                    LinkAddress.class, Inet4Address.class);
             makeServingParams.setAccessible(true);
+            Field dnsServers = makeServingParams.getReturnType().getField("dnsServers");
+            dnsServers.setAccessible(true);
+            Method interfaceName = ipServerClass.getDeclaredMethod("interfaceName");
+            interfaceName.setAccessible(true);
 
             hook(makeServingParams).intercept(chain -> {
-                String iface = getInterfaceName(ipServerClass, chain.getThisObject());
-                TargetConfig config = configForInterface(iface);
-                if (config == null) {
-                    return chain.proceed();
+                Object parcel = chain.proceed();
+                if (parcel == null) return null;
+                try {
+                    String iface = String.valueOf(interfaceName.invoke(chain.getThisObject()));
+                    if (configForInterface(iface) == null) return parcel;
+                    dnsServers.set(parcel, new int[] { toInt(DNS_PRIMARY), toInt(DNS_SECONDARY) });
+                    Log.i(TAG, "DNS_DHCP_FIXED iface=" + iface
+                            + " dnsServers=[1.1.1.1, 8.8.8.8] defaultRouter=" + chain.getArg(0));
+                } catch (Throwable t) {
+                    Log.e(TAG, "DNS_DHCP_PATCH_FAILED; preserving native parameters", t);
                 }
-
-                Object[] args = chain.getArgs().toArray();
-                // Preserve defaultRouter (args[0]); use Cloudflare as the builder DNS.
-                args[1] = DNS_PRIMARY;
-
-                Object parcel = chain.proceed(args);
-                if (parcel == null) {
-                    Log.e(TAG, "DNS_DHCP_PATCH_FAILED iface=" + iface
-                            + " makeServingParams returned null");
-                    return null;
-                }
-
-                Field dnsServersField = parcel.getClass().getField("dnsServers");
-                dnsServersField.setAccessible(true);
-                dnsServersField.set(parcel, new int[] {
-                        toInt(DNS_PRIMARY), toInt(DNS_SECONDARY)
-                });
-
-                Log.i(TAG, "DNS_DHCP_FIXED iface=" + iface
-                        + " dnsServers=[" + DNS_PRIMARY.getHostAddress()
-                        + ", " + DNS_SECONDARY.getHostAddress() + "]"
-                        + " defaultRouter=" + args[0]);
                 return parcel;
             });
 
@@ -585,8 +627,8 @@ public final class HotspotProbe extends XposedModule {
     /**
      * Runtime MAC -> IPv4 reservations stored in Settings.Global.
      *
-     * Important: static addresses are intentionally kept outside the dynamic
-     * pool (.100-.200). Do NOT add them to DhcpLeaseRepository.updateParams()
+     * Static addresses may be inside or outside the dynamic pool (.100-.200).
+     * Do NOT add them to DhcpLeaseRepository.updateParams()
      * reserved-address set: Android's allocator must still be able to issue the
      * configured static address to its matching MAC.
      */
@@ -606,13 +648,16 @@ public final class HotspotProbe extends XposedModule {
     }
 
     private static Map<String, Integer> getStaticReservations(TargetConfig config) {
-        Map<String, Integer> result = new HashMap<>();
         String raw = readRuntimeConfig();
 
-        // An empty configuration means that no static reservations are configured.
+        // Invalidate old snapshots when reservations are cleared.
         if (raw == null || raw.trim().isEmpty() || "null".equals(raw.trim())) {
-            return result;
+            RESERVATION_CACHE.remove(config.iface);
+            return Collections.emptyMap();
         }
+        ReservationSnapshot cached = RESERVATION_CACHE.get(config.iface);
+        if (cached != null && raw.equals(cached.raw)) return cached.reservations;
+        Map<String, Integer> result = new HashMap<>();
 
         try {
             JSONObject root = new JSONObject(raw);
@@ -621,7 +666,9 @@ public final class HotspotProbe extends XposedModule {
             if (reservations == null) {
                 Log.w(TAG, "RUNTIME_CONFIG_NO_RESERVATIONS_ARRAY iface=" + config.iface
                         + " schema=" + schemaVersion);
-                return result;
+                ReservationSnapshot snapshot = new ReservationSnapshot(raw, result);
+                RESERVATION_CACHE.put(config.iface, snapshot);
+                return snapshot.reservations;
             }
 
             int matchingInterface = 0;
@@ -654,20 +701,18 @@ public final class HotspotProbe extends XposedModule {
                 result.put(mac, ip);
             }
 
-            String signature = config.iface + "|" + raw;
-            String previous = LAST_CONFIG_SIGNATURES.put(config.iface, signature);
-            if (!signature.equals(previous)) {
-                Log.i(TAG, "RUNTIME_CONFIG_LOADED iface=" + config.iface
-                        + " schema=" + schemaVersion
-                        + " matchingInterface=" + matchingInterface
-                        + " reservations=" + result.size()
-                        + " rejected=" + rejected);
-            }
+            Log.i(TAG, "RUNTIME_CONFIG_LOADED iface=" + config.iface
+                    + " schema=" + schemaVersion
+                    + " matchingInterface=" + matchingInterface
+                    + " reservations=" + result.size()
+                    + " rejected=" + rejected);
         } catch (Throwable t) {
             Log.e(TAG, "RUNTIME_CONFIG_PARSE_FAILED; no static reservations applied", t);
             result.clear();
         }
-        return result;
+        ReservationSnapshot snapshot = new ReservationSnapshot(raw, result);
+        RESERVATION_CACHE.put(config.iface, snapshot);
+        return snapshot.reservations;
     }
 
     private static String readRuntimeConfig() {
@@ -859,10 +904,20 @@ public final class HotspotProbe extends XposedModule {
 
     private static IpPrefix createPrefix(int network) {
         try {
-            return new IpPrefix(ipv4FromInt(network), 24);
+            return createIpPrefix(ipv4FromInt(network), 24);
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
+    }
+
+    private static IpPrefix createIpPrefix(InetAddress address, int prefixLength)
+            throws ReflectiveOperationException {
+        if (Build.VERSION.SDK_INT >= 33) return new IpPrefix(address, prefixLength);
+        // This constructor existed as a hidden API before it entered the public SDK.
+        java.lang.reflect.Constructor<IpPrefix> constructor =
+                IpPrefix.class.getDeclaredConstructor(InetAddress.class, int.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(address, prefixLength);
     }
 
     private static LinkAddress createLinkAddress(Inet4Address address, int prefixLength)
@@ -896,7 +951,6 @@ public final class HotspotProbe extends XposedModule {
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             if (interfaces == null) return true;
 
-            boolean sawOtherIpv4 = false;
             while (interfaces.hasMoreElements()) {
                 NetworkInterface iface = interfaces.nextElement();
                 String name = iface.getName();
@@ -908,7 +962,6 @@ public final class HotspotProbe extends XposedModule {
                     short prefixLength = interfaceAddress.getNetworkPrefixLength();
                     if (prefixLength <= 0 || prefixLength > 32) continue;
 
-                    sawOtherIpv4 = true;
                     int address = toInt((Inet4Address) interfaceAddress.getAddress());
                     int otherMask = prefixLength == 32
                             ? 0xFFFFFFFF : (int) (0xFFFFFFFFL << (32 - prefixLength));
@@ -925,8 +978,10 @@ public final class HotspotProbe extends XposedModule {
                 }
             }
 
-            // Fail closed if no upstream IPv4 interface could be inspected.
-            return !sawOtherIpv4;
+            // USB can start before mobile data has an IPv4 address. An empty
+            // upstream list is not a prefix conflict; later startup must not
+            // depend on another downstream already being active.
+            return false;
         } catch (SocketException e) {
             Log.e(TAG, "UPSTREAM_CHECK_FAILED; using original Android address", e);
             return true;
