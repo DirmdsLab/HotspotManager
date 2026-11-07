@@ -1,9 +1,20 @@
-# Hotspot Manager 0.6.10
+# Hotspot Manager 0.7.0
 
 A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
 networks and live DHCP reservations. Intended device: Infinix with MediaTek
 Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
 Tethering and NetworkStack class layout used by this project.
+
+## Version 0.7.0 device profiles
+
+- Existing device cards and IP-assignment actions are retained; add manual device type.
+- Tap a device/IP to open native metadata and settings scoped to that MAC.
+- Save permanent device-type profiles, reopen saved/disconnected MACs, or reset one device.
+- Native Wi-Fi MAC blocking is capability-gated and persists in Android's own blocklist.
+- Exact connection time, per-client usage/speed/limits/quota, and USB blocking are skipped.
+
+See [DEVICE_PROFILES.md](DEVICE_PROFILES.md) for supported fields, persistence,
+reset scope, omitted features, and firmware validation.
 
 ## Version 0.6.10 maintenance
 
@@ -106,7 +117,7 @@ pool. A client must renew DHCP or reconnect after its reservation changes.
 ## Included release artifact
 
 The fixed source distribution includes
-`artifacts/HotspotManager-0.6.10-unsigned.apk`. Sign it before installation using
+`artifacts/HotspotManager-0.7.0-unsigned.apk`. Sign it before installation using
 the instructions below. `VALIDATION.md` records the completed checks and their
 limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 

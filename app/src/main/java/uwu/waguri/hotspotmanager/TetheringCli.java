@@ -54,7 +54,7 @@ public final class TetheringCli {
         System.exit(exitCode);
     }
 
-    private static Context systemContext() throws Exception {
+    static Context systemContext() throws Exception {
         // ActivityThread uses this thread's looper for the system Context.
         // Tethering callbacks use explicit executors and do not need a process main looper.
         if (Looper.myLooper() == null) Looper.prepare();

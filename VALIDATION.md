@@ -1,105 +1,104 @@
-# Validation results: Hotspot Manager 0.6.10
+# Validation results: Hotspot Manager 0.7.0
 
 Validation date: 2026-11-07 (Asia/Jakarta).
 
-## Build environment
+## Build and APK
 
-- JDK: Eclipse Temurin 17; Gradle: 8.13.
-- Android Gradle Plugin: 8.13.2; SDK platform: 36; build tools: 36.0.0.
-- Application ID: `uwu.waguri.hotspotmanager`.
-- Version: `0.6.10`; version code: `20`.
+- JDK 17; Gradle 8.13; Android Gradle Plugin 8.13.2.
+- SDK platform 36; build tools 36.0.0.
+- Package: `uwu.waguri.hotspotmanager`; version code 21; version name 0.7.0.
+- Release build passed; non-debuggable, unsigned APK; ZIP alignment check passed.
+- Xposed entry point and both static scopes are present.
+- Device inspection, profiles, and native block-control classes are present in DEX.
+- Java compilation retains `-Xlint:deprecation`; no deprecated-API compiler note emitted.
+- Unit tests: 36 passed, 0 failed, 0 errors, 0 skipped.
+- Android lint: 0 errors, 29 warnings; no baseline or blanket suppression added.
 
-## Completed checks
+Commands used:
 
 ```bash
-./gradlew :app:clean :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
+./gradlew :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
 ```
 
-- Release build: passed.
-- Unit tests: 24 passed, 0 failed, 0 errors, 0 skipped.
-- Android lint: 0 errors, 26 warnings; no baseline or blanket suppression added.
-- APK: non-debuggable; unsigned; 4-byte ZIP alignment check passed.
-- Compiled APK manifest: explicit exported TetheringReceiver requires DUMP permission.
-- APK DEX: CLI, receiver, and command-control classes are present.
-- Xposed entry point and both static scopes remain present.
-- HotspotProbe.java and UsbUpstreamRecovery.java are byte-for-byte unchanged from 0.6.8.
+## Retained implementation
 
-## Automated coverage
+The following files are byte-for-byte unchanged from 0.6.10:
 
+- `HotspotProbe.java`
+- `UsbUpstreamRecovery.java`
+- `TetheringControl.java`
+- `TetheringController.java`
+- `TetheringReceiver.java`
+- `RootShell.java`
+
+TetheringCli.systemContext has package visibility so the new root helper can reuse
+its initialization; its existing implementation is retained. MainActivity keeps
+the previous device-summary data, IP actions, reservation JSON key/schema, and
+GUI tethering controls. It adds details/profiles and an optional post-save callback
+for a selected-device reset.
+
+## Automated suites
+
+- `DeviceProfileTest`: 12 tests.
 - `TetheringControlTest`: 14 tests.
 - `UsbUpstreamRecoveryTest`: 10 tests.
 
-The control tests cover reading state without mutation, idempotent commands,
-USB/hotspot independence, waiting for real interface activation/removal,
-missing-USB timeout, native permission failure, strict input rejection,
-interrupted confirmation, and immutable snapshots. The original ten USB-first
-retry lifecycle tests are retained.
+New tests cover normalized unicast MAC validation, distinct MAC identities despite
+IP reuse, matching identities across IP/interface changes, unknown manual types,
+selected-only blocklist edits, case-insensitive duplicate handling, preserving
+unrelated entries, and refusing a purported temporary native block.
 
-## Lint warnings retained
+Existing tests cover USB-first recovery and native-control command lifecycle.
+No test substitutes a mock result for claimed vendor-HAL, Android UI, persistent
+storage/reboot, or actual traffic verification.
+
+## Warnings retained
 
 - `DataExtractionRules`: 1.
 - `DiscouragedPrivateApi`: 5.
+- `GradleDependency`: 1.
 - `IconLauncherShape`: 5.
 - `IconLocation`: 1.
 - `MonochromeLauncherIcon`: 1.
 - `ObsoleteSdkInt`: 1.
-- `PrivateApi`: 9.
+- `PrivateApi`: 11.
 - `SetTextI18n`: 2.
 - `StaticFieldLeak`: 1.
 
-Warnings include intentional framework reflection for the root/Vector helpers,
-existing launcher/backup metadata, application/system-context caching, and
-English-only UI string construction. The API 36 service-name constant warning
-has been removed by using class-based service lookup.
+The warnings concern intentional framework reflection for root/Vector features,
+existing artwork/backup metadata, English-only strings, application/system-context
+caching, and an available dependency update. Dependencies were not upgraded as
+part of this feature change. Compiler deprecation diagnostics remain enabled.
 
-## Deprecation verification
+## Firmware and UI validation still required
 
-- Both release and debug Java were recompiled after `:app:clean`.
-- `-Xlint:deprecation` was enabled for all JavaCompile tasks.
-- No deprecated-API compiler notes or deprecation warnings were emitted.
-- Release bytecode invokes `Looper.prepare()` and contains no call to
-  `prepareMainLooper()`.
-- No suppression or warning-disable flag was added for this change.
-- The GUI, receiver, command engine, and USB-first hooks retain their behavior;
-  only root-context initialization and service lookup changed.
+No physical Infinix device, Android UI runtime, Magisk daemon, Vector process, or
+Wi-Fi HAL was available. No Android screenshot or device-level success is claimed.
+The framework method signatures and native capability/enforcement flow were
+checked against AOSP Android 16 source.
 
-AOSP Android 16 source shows ActivityThread capturing `Looper.myLooper()` and
-ContextImpl returning that looper from `getMainLooper()`. This helper passes
-explicit executors for Binder callbacks, so a process-global main looper is not
-needed for its tethering calls. Physical-firmware validation remains required.
+Verify on the device:
 
-References:
+1. Original gateway, DHCP, DNS, Lock/Use dynamic buttons, GUI toggles, and ADB commands.
+2. Device card/IP click opens the selected MAC only; manual type appears in the list.
+3. Remembered profiles survive restart/reboot and a different DHCP IP for the same MAC.
+4. Temporary types disappear when the app process terminates.
+5. Missing native hostname/addresses/time/stats are not fabricated.
+6. Unsupported Wi-Fi blocking is skipped without changing hotspot configuration.
+7. If capability is reported, block one test MAC; verify actual disconnection/rejoin
+   prevention while other clients and saved hotspot credentials remain intact.
+8. Open a disconnected/blocked MAC through Saved device profiles and reset/unblock it.
+9. Verify reset affects only the chosen MAC/profile/block and selected-interface IP
+   reservation; another interface's reservation and other MACs remain intact.
+10. Re-run USB-first DNS tests before enabling the hotspot.
 
-- https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/core/java/android/app/ActivityThread.java
-- https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/core/java/android/app/ContextImpl.java
+Native block policy is permanent until removed. A successful saved-list readback
+is not proof that a vendor driver has disconnected the client. Exact connection
+start time, per-client usage/speed/limits/quota, automatic device classification,
+and individual USB blocking are intentionally not implemented. See DEVICE_PROFILES.md.
 
-The lint HTML-report location is informational output. Gradle's Problems report
-is also a diagnostic artifact; its existence is not a build failure. The final
-clean build did not emit the previous Java deprecation diagnostics or a new
-Problems-report announcement.
+## Included artifact
 
-## Required physical-device validation
-
-No physical Android device, Magisk daemon, Vector runtime, or Android UI runtime
-was available here. The GUI has not been rendered or tapped on the Infinix.
-Native app_process/Binder execution, ADB broadcast authorization/delivery,
-USB transport transitions, saved hotspot configuration, and real DNS traffic
-still need verification on that firmware. Automated tests cover the command
-engine and retry lifecycle, not these integrations.
-
-Test after signing, installing, granting app root access, and rebooting:
-
-1. Confirm USB and Hotspot appear as two columns above Network Status.
-2. Toggle hotspot on/off and verify the existing SSID/password are used.
-3. Enable USB first with hotspot off; run the DNS checks in README.md.
-4. Run the ADB on/off/status commands in TERMINAL.md with the GUI closed.
-5. Reopen the GUI and verify actual state; also change tethering in Settings.
-6. Enable both, disable one, and confirm the other remains active.
-7. Test a missing USB cable and denied Magisk permission; verify there is no false On state.
-8. Reconnect USB and verify the retained USB-first recovery behavior.
-
-## Prebuilt artifact
-
-`artifacts/HotspotManager-0.6.10-unsigned.apk` requires signing before installation.
-Use the same key as the installed app for an in-place update. No private key is
-included. The pre-signing digest is in `artifacts/SHA256SUMS`; signing changes it.
+`artifacts/HotspotManager-0.7.0-unsigned.apk` must be signed with the installed
+app's key before an in-place update. No signing key is included. Pre-signing
+integrity data is in `artifacts/SHA256SUMS`; signing changes APK bytes.

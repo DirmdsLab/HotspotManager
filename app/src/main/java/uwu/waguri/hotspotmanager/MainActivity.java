@@ -1,6 +1,7 @@
 package uwu.waguri.hotspotmanager;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -25,6 +26,7 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Switch;
+import android.widget.CheckBox;
 
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
@@ -40,6 +42,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Date;
+import java.text.DateFormat;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "WaguriHotspotUI";
@@ -90,6 +94,14 @@ public final class MainActivity extends Activity {
     };
     private int activeTab = 0;
     private volatile boolean busy = false;
+    private DeviceProfiles deviceProfiles;
+    private Client selectedClient;
+    private JSONObject deviceMetadata;
+    private String deviceMetadataError;
+    private long deviceMetadataTime;
+    private boolean deviceLoading;
+    private DeviceProfile.Type draftType = DeviceProfile.Type.UNKNOWN;
+    private boolean draftRemember;
 
     private static final class Reservation {
         final String iface;
@@ -125,6 +137,7 @@ public final class MainActivity extends Activity {
         try {
             // System bar colors and icon appearance are defined by AppTheme.
             // A new Activity starts with system bars visible; no legacy UI flags are needed.
+            deviceProfiles = new DeviceProfiles(this);
             buildShell();
             refreshAll();
         } catch (Throwable t) {
@@ -405,7 +418,8 @@ public final class MainActivity extends Activity {
     private void renderPage() {
         if (page == null) return;
         page.removeAllViews();
-        if (activeTab == 0) renderDevicesPage();
+        if (activeTab == 0 && selectedClient != null) renderDeviceDetails();
+        else if (activeTab == 0) renderDevicesPage();
         else renderManualPage();
     }
 
@@ -422,7 +436,7 @@ public final class MainActivity extends Activity {
         page.addView(titleRow);
 
         TextView description = label(
-                "Lock the device's current IP address, or release its MAC address back to dynamic DHCP.",
+                "Lock the device's current IP address, or release its MAC address back to dynamic DHCP. Tap a device or its IP for details.",
                 12, false, MUTED);
         description.setPadding(0, dp(4), 0, dp(8));
         page.addView(description);
@@ -453,7 +467,14 @@ public final class MainActivity extends Activity {
         top.addView(stateChip);
         box.addView(top);
 
-        box.addView(label(client.ip, 28, true, TEXT));
+        TextView ipLabel = label(client.ip, 28, true, TEXT);
+        ipLabel.setContentDescription("Show device details for " + client.mac);
+        ipLabel.setOnClickListener(v -> openDeviceDetails(client));
+        box.setOnClickListener(v -> openDeviceDetails(client));
+        box.addView(ipLabel);
+        DeviceProfile profile = deviceProfiles.get(client.mac);
+        box.addView(label("Device type  ·  " + (profile == null
+                ? DeviceProfile.Type.UNKNOWN.label : profile.type.label), 12, false, MUTED));
         box.addView(label("MAC  " + client.mac, 13, false, MUTED));
         box.addView(label("Neighbor state  ·  " + client.state, 11, false, MUTED));
         if (saved != null) {
@@ -475,6 +496,278 @@ public final class MainActivity extends Activity {
         actions.addView(dynamic, dynamicParams);
         box.addView(actions);
         addPageCard(page, box);
+    }
+
+    private void openDeviceDetails(Client client) {
+        if (isOperationInProgress()) return;
+        if (controlBusy) { setStatus("Wait for the tethering operation to finish."); return; }
+        try {
+            DeviceProfile.normalizeMac(client.mac);
+            DeviceProfile profile = deviceProfiles.get(client.mac);
+            selectedClient = client;
+            draftType = profile == null ? DeviceProfile.Type.UNKNOWN : profile.type;
+            draftRemember = profile != null && profile.permanent;
+            deviceMetadata = null;
+            deviceMetadataError = null;
+            deviceMetadataTime = 0L;
+            activeTab = 0;
+            showTab(0);
+            loadDeviceMetadata(client);
+        } catch (IllegalArgumentException error) {
+            setStatus(error.getMessage());
+        }
+    }
+
+    private Client currentSelectedClient() {
+        for (Client client : clients) {
+            if (client.mac.equals(selectedClient.mac) && client.iface.equals(selectedClient.iface)) {
+                return client;
+            }
+        }
+        return selectedClient;
+    }
+
+    private boolean isSelectedDevice(String mac) {
+        return !isDestroyed() && !isFinishing() && selectedClient != null && selectedClient.mac.equals(mac);
+    }
+
+    private void loadDeviceMetadata(Client client) {
+        if (busy || controlBusy) {
+            setStatus("Wait for the current operation, then refresh device details.");
+            return;
+        }
+        busy = true;
+        deviceLoading = true;
+        renderPage();
+        DeviceController.execute(this, "inspect", client.mac, reply -> {
+            busy = false;
+            deviceLoading = false;
+            if (!isSelectedDevice(client.mac)) return;
+            deviceMetadata = reply.data;
+            deviceMetadataError = reply.error;
+            deviceMetadataTime = System.currentTimeMillis();
+            renderPage();
+        });
+    }
+
+    private void renderDeviceDetails() {
+        Client client = currentSelectedClient();
+        LinearLayout navigation = row();
+        Button back = actionButton("Back to devices", false);
+        back.setOnClickListener(v -> { selectedClient = null; renderPage(); });
+        navigation.addView(back, new LinearLayout.LayoutParams(0, dp(46), 1f));
+        Button refresh = actionButton("Refresh details", false);
+        refresh.setEnabled(!busy && !controlBusy);
+        refresh.setOnClickListener(v -> loadDeviceMetadata(currentSelectedClient()));
+        navigation.addView(refresh, new LinearLayout.LayoutParams(0, dp(46), 1f));
+        page.addView(navigation);
+
+        LinearLayout identity = card();
+        identity.addView(label("DEVICE DETAILS", 10, true, MUTED));
+        identity.addView(label(client.ip.isEmpty() ? "IP unavailable" : client.ip, 25, true, TEXT));
+        identity.addView(label("MAC  " + client.mac, 13, true, ACCENT));
+        detailRow(identity, "Interface", client.iface);
+        detailRow(identity, "Neighbor state / saved record", client.state);
+        Reservation reservation = findReservation(client.iface, client.mac);
+        detailRow(identity, "IP assignment", reservation == null ? "Dynamic DHCP" : "Locked to " + reservation.ip);
+        identity.addView(label("The IP is a neighbor-cache or saved record and can be outdated. Settings target the selected MAC, not another device reusing that IP.", 11, false, MUTED));
+        addPageCard(page, identity);
+
+        LinearLayout metadata = card();
+        metadata.addView(label("ANDROID DEVICE DATA", 10, true, MUTED));
+        if (deviceLoading) metadata.addView(label("Reading Android metadata...", 12, false, MUTED));
+        else if (deviceMetadataError != null) metadata.addView(label(deviceMetadataError, 12, false, RED));
+        JSONObject nativeClient = deviceMetadata == null ? null : deviceMetadata.optJSONObject("client");
+        detailRow(metadata, "Client reported by Android", nativeClient == null ? "Unavailable"
+                : nativeClient.optBoolean("reported") ? "Yes (client / lease record)" : "No matching client record");
+        JSONArray addresses = nativeClient == null ? null : nativeClient.optJSONArray("addresses");
+        if (addresses == null || addresses.length() == 0) {
+            detailRow(metadata, "DHCP hostname", "Not reported");
+            detailRow(metadata, "Assigned addresses", "Not reported");
+        } else {
+            for (int i = 0; i < addresses.length(); i++) {
+                JSONObject address = addresses.optJSONObject(i);
+                if (address == null) continue;
+                detailRow(metadata, "Assigned address", address.optString("address", "Not reported"));
+                detailRow(metadata, "DHCP hostname", safeDeviceText(address.optString("hostname", "Not reported")));
+                long expiration = address.optLong("expiresAt", 0L);
+                if (expiration > 0L) detailRow(metadata, "Lease expires", formatDeviceTime(expiration));
+            }
+        }
+        if (deviceMetadata != null && deviceMetadata.has("clientError")) {
+            metadata.addView(label(deviceMetadata.optString("clientError"), 11, false, MUTED));
+        }
+        if (deviceMetadataTime > 0L) detailRow(metadata, "Metadata refreshed", formatDeviceTime(deviceMetadataTime));
+        detailRow(metadata, "Connection start time", "Not reported by Android");
+        addPageCard(page, metadata);
+
+        JSONObject wifi = deviceMetadata == null ? null : deviceMetadata.optJSONObject("wifi");
+        boolean blocked = wifi != null && wifi.optBoolean("blocked");
+        boolean supported = wifi != null && wifi.optBoolean("blockSupported");
+        LinearLayout profile = card();
+        profile.addView(label("SETTINGS FOR THIS MAC", 10, true, MUTED));
+        profile.addView(label("These settings follow this MAC if its IP changes. A different or randomized MAC uses a different profile.", 12, false, MUTED));
+        profile.addView(fieldLabel("DEVICE TYPE (MANUAL)"));
+        String[] types = new String[DeviceProfile.Type.values().length];
+        for (DeviceProfile.Type type : DeviceProfile.Type.values()) types[type.ordinal()] = type.label;
+        Spinner type = spinner(types);
+        type.setSelection(draftType.ordinal());
+        type.setEnabled(!busy);
+        type.setOnItemSelectedListener(new SelectionListener(() ->
+                draftType = DeviceProfile.Type.values()[type.getSelectedItemPosition()]));
+        profile.addView(type);
+        CheckBox remember = new CheckBox(this);
+        remember.setText(R.string.remember_device_settings);
+        remember.setTextColor(TEXT);
+        remember.setChecked(draftRemember);
+        remember.setEnabled(!busy);
+        remember.setOnCheckedChangeListener((button, checked) -> draftRemember = checked);
+        profile.addView(remember);
+        profile.addView(label("Unchecked: the type lasts for this app process only. Android Wi-Fi blocks always persist until unblocked or reset.", 11, false, MUTED));
+        Button save = actionButton("Save device profile", true);
+        save.setEnabled(!busy);
+        save.setOnClickListener(v -> saveDeviceProfile(client, blocked));
+        profile.addView(save, new LinearLayout.LayoutParams(-1, dp(46)));
+        addPageCard(page, profile);
+
+        LinearLayout access = card();
+        access.addView(label("DEVICE ACCESS", 10, true, MUTED));
+        if (WIFI_IFACE.equals(client.iface)) {
+            detailRow(access, "Native Wi-Fi block", wifi == null ? "Unavailable" : blocked ? "MAC is in the saved blocklist" : "MAC is not in the blocklist");
+            if (supported || blocked) {
+                Button block = actionButton(blocked ? "Unblock Wi-Fi device" : "Block Wi-Fi device", !blocked);
+                block.setEnabled(!busy && !controlBusy);
+                block.setOnClickListener(v -> changeDeviceBlock(client, !blocked));
+                access.addView(block, new LinearLayout.LayoutParams(-1, dp(46)));
+                access.addView(label("This uses Android's saved MAC blocklist. The same MAC is blocked on future Wi-Fi connections until you unblock or reset it.", 11, false, MUTED));
+            } else {
+                access.addView(label("Native Wi-Fi client blocking support was not reported. No block is applied.", 12, false, MUTED));
+            }
+            if (deviceMetadata != null && deviceMetadata.has("wifiError")) {
+                access.addView(label(deviceMetadata.optString("wifiError"), 11, false, MUTED));
+            }
+        } else {
+            access.addView(label("Individual USB client blocking is not available in this release.", 12, false, MUTED));
+        }
+        detailRow(access, "Per-device data usage", "Unavailable");
+        detailRow(access, "Current per-device Internet speed", "Unavailable");
+        detailRow(access, "Speed limit / data quota", "Not implemented");
+        access.addView(label("Reliable per-client traffic statistics and limits are not exposed by the Android path used here. These controls are skipped.", 11, false, MUTED));
+        addPageCard(page, access);
+
+        Button reset = actionButton("Reset this device to defaults", false);
+        reset.setTextColor(RED);
+        reset.setEnabled(!busy && !controlBusy);
+        reset.setOnClickListener(v -> confirmDeviceReset(client));
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(-1, dp(48));
+        resetParams.topMargin = dp(10);
+        page.addView(reset, resetParams);
+        page.addView(label("Reset removes this MAC's profile and any Wi-Fi block, and returns its selected-interface reservation to dynamic DHCP. Other devices and other-interface IP reservations are kept.", 11, false, MUTED));
+    }
+
+    private void detailRow(LinearLayout parent, String name, String value) {
+        parent.addView(label(name + "  ·  " + value, 12, false, TEXT));
+    }
+
+    private static String safeDeviceText(String value) {
+        return value.replaceAll("[\\p{Cntrl}]", " ").substring(0, Math.min(value.length(), 253));
+    }
+
+    private String formatDeviceTime(long time) {
+        return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM, Locale.ENGLISH).format(new Date(time));
+    }
+
+    private void saveDeviceProfile(Client client, boolean blocked) {
+        if (isOperationInProgress()) return;
+        try {
+            DeviceProfile saved = deviceProfiles.get(client.mac);
+            if (!draftRemember && saved != null && saved.permanent
+                    && (deviceMetadata == null || deviceMetadata.optJSONObject("wifi") == null)) {
+                throw new IllegalStateException("Refresh the native Wi-Fi block state before removing a permanent profile.");
+            }
+            DeviceProfile.requireRememberedBlock(blocked, draftRemember);
+            deviceProfiles.save(new DeviceProfile(client.mac, draftType, client.iface, client.ip, draftRemember));
+            setStatus(draftRemember ? "Device profile saved permanently by MAC." : "Device type saved for this app process only.");
+            renderPage();
+        } catch (Exception error) { setStatus(error.getMessage()); }
+    }
+
+    private void changeDeviceBlock(Client client, boolean blocked) {
+        if (isOperationInProgress() || controlBusy) return;
+        try { DeviceProfile.requireRememberedBlock(blocked, draftRemember); }
+        catch (IllegalArgumentException error) { setStatus(error.getMessage()); return; }
+        busy = true;
+        DeviceProfile.Type requestedType = draftType;
+        boolean remember = draftRemember;
+        renderPage();
+        DeviceController.execute(this, blocked ? "block" : "unblock", client.mac, reply -> {
+            busy = false;
+            if (isDestroyed() || isFinishing()) return;
+            if (!reply.ok()) { setStatus(reply.error); if (isSelectedDevice(client.mac)) renderPage(); return; }
+            try {
+                deviceProfiles.save(new DeviceProfile(client.mac, requestedType, client.iface, client.ip, remember));
+                updateBlockMetadata(blocked);
+                setStatus(blocked ? "Native Wi-Fi block saved for " + client.mac + "."
+                        : "Native Wi-Fi block removed for " + client.mac + ".");
+            } catch (Exception error) { setStatus("Native blocklist changed; profile save failed: " + error.getMessage()); }
+            if (isSelectedDevice(client.mac)) renderPage();
+        });
+    }
+
+    private void updateBlockMetadata(boolean blocked) throws Exception {
+        if (deviceMetadata == null) deviceMetadata = new JSONObject();
+        JSONObject wifi = deviceMetadata.optJSONObject("wifi");
+        if (wifi == null) { wifi = new JSONObject(); deviceMetadata.put("wifi", wifi); }
+        wifi.put("blocked", blocked);
+    }
+
+    private void confirmDeviceReset(Client client) {
+        new AlertDialog.Builder(this)
+                .setTitle("Reset selected device?")
+                .setMessage("Remove the profile and any Wi-Fi block for " + client.mac + ", and release its "
+                        + client.iface + " IP reservation? Other MAC addresses and other-interface reservations are kept.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Reset", (dialog, which) -> resetDevice(client))
+                .show();
+    }
+
+    private void resetDevice(Client client) {
+        if (isOperationInProgress() || controlBusy) return;
+        busy = true;
+        renderPage();
+        // A profile follows the MAC across interfaces, so also remove any saved Wi-Fi block.
+        // The DHCP reservation reset below remains scoped to the selected interface.
+        DeviceController.execute(this, "unblock", client.mac, reply -> {
+            busy = false;
+            if (isDestroyed() || isFinishing()) return;
+            if (!reply.ok()) { setStatus("Reset stopped: " + reply.error); renderPage(); return; }
+            try { updateBlockMetadata(false); } catch (Exception ignored) { }
+            finishDeviceReset(client);
+        });
+    }
+
+    private void finishDeviceReset(Client client) {
+        removeReservation(client.iface, client.mac);
+        saveReservations("Selected device defaults restored. Renew DHCP to release the old address.", () -> {
+            deviceProfiles.remove(client.mac);
+            if (isSelectedDevice(client.mac)) { draftType = DeviceProfile.Type.UNKNOWN; draftRemember = false; }
+        });
+    }
+
+    private void renderSavedDeviceProfiles() {
+        page.addView(label("Saved device profiles", 19, true, TEXT));
+        List<DeviceProfile> profiles = deviceProfiles.saved();
+        if (profiles.isEmpty()) page.addView(label("No permanent device profiles yet.", 12, false, MUTED));
+        for (DeviceProfile profile : profiles) {
+            LinearLayout box = card();
+            box.addView(label(profile.mac, 14, true, TEXT));
+            box.addView(label("Device type  ·  " + profile.type.label, 12, false, MUTED));
+            box.addView(label("Last saved interface / IP  ·  " + profile.iface + " / " + profile.ip, 11, false, MUTED));
+            Button open = actionButton("Open device settings", false);
+            open.setOnClickListener(v -> openDeviceDetails(new Client(profile.iface, profile.ip, profile.mac, "Saved profile")));
+            box.addView(open, new LinearLayout.LayoutParams(-1, dp(46)));
+            addPageCard(page, box);
+        }
     }
 
     private void renderManualPage() {
@@ -621,6 +914,7 @@ public final class MainActivity extends Activity {
                 renderSavedReservation(reservation);
             }
         }
+        renderSavedDeviceProfiles();
     }
 
     private void renderSavedReservation(Reservation r) {
@@ -834,6 +1128,10 @@ public final class MainActivity extends Activity {
     }
 
     private void saveReservations(String successMessage) {
+        saveReservations(successMessage, null);
+    }
+
+    private void saveReservations(String successMessage, Runnable afterSuccess) {
         String json;
         try {
             JSONObject root = new JSONObject();
@@ -872,6 +1170,7 @@ public final class MainActivity extends Activity {
                     setStatus("Save failed. Grant root access in Magisk Superuser and try again.");
                     refreshAll();
                 } else {
+                    if (afterSuccess != null) afterSuccess.run();
                     setStatus(successMessage);
                     refreshAll();
                 }
