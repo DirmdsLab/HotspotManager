@@ -1,6 +1,13 @@
 package uwu.waguri.hotspotmanager;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.res.ColorStateList;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Bundle;
 import android.view.View;
 import android.graphics.Typeface;
@@ -17,7 +24,9 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Switch;
 
+import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -25,8 +34,6 @@ import androidx.core.view.WindowInsetsCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -59,6 +66,28 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button devicesTab;
     private Button manualTab;
+    private Switch usbToggle;
+    private Switch hotspotToggle;
+    private TextView usbControlStatus;
+    private TextView hotspotControlStatus;
+    private boolean syncingToggles;
+    private boolean controlBusy;
+    private boolean tetherRefreshPending;
+    private boolean resumed;
+    private boolean tetherReceiverRegistered;
+    private TetheringControl.Target changingTarget;
+    private boolean changingEnabled;
+    private TetheringControl.State tetheringState;
+    private final Handler controlHandler = new Handler(Looper.getMainLooper());
+    private final Runnable refreshTetheringTask = this::refreshTetheringState;
+    private final BroadcastReceiver tetherStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if ("android.net.conn.TETHER_STATE_CHANGED".equals(intent.getAction())) {
+                scheduleTetheringRefresh();
+            }
+        }
+    };
     private int activeTab = 0;
     private volatile boolean busy = false;
 
@@ -102,6 +131,33 @@ public final class MainActivity extends Activity {
             Log.e(TAG, "ACTIVITY_START_FAILED", t);
             showStartupError(t);
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+        if (usbToggle == null) return;
+        try {
+            ContextCompat.registerReceiver(this, tetherStateReceiver,
+                    new IntentFilter("android.net.conn.TETHER_STATE_CHANGED"),
+                    ContextCompat.RECEIVER_EXPORTED);
+            tetherReceiverRegistered = true;
+        } catch (Exception e) {
+            Log.w(TAG, "TETHER_STATE_RECEIVER_UNAVAILABLE", e);
+        }
+        scheduleTetheringRefresh();
+    }
+
+    @Override
+    protected void onPause() {
+        resumed = false;
+        controlHandler.removeCallbacks(refreshTetheringTask);
+        if (tetherReceiverRegistered) {
+            unregisterReceiver(tetherStateReceiver);
+            tetherReceiverRegistered = false;
+        }
+        super.onPause();
     }
 
     private void showStartupError(Throwable error) {
@@ -151,6 +207,8 @@ public final class MainActivity extends Activity {
         header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1f));
         root.addView(header);
 
+        buildTetheringControls(root);
+
         LinearLayout summary = card();
         summary.setOrientation(LinearLayout.VERTICAL);
         summary.addView(label("NETWORK STATUS", 10, true, MUTED));
@@ -197,6 +255,132 @@ public final class MainActivity extends Activity {
         showTab(0);
     }
 
+    private void buildTetheringControls(LinearLayout root) {
+        LinearLayout controls = row();
+        controls.setGravity(Gravity.TOP);
+        LinearLayout usb = card();
+        usb.addView(label("USB", 14, true, ACCENT));
+        usbToggle = tetheringSwitch("USB tethering");
+        usbControlStatus = label("Checking...", 11, false, MUTED);
+        usb.addView(usbToggle);
+        usb.addView(usbControlStatus);
+        LinearLayout hotspot = card();
+        hotspot.addView(label("Hotspot", 14, true, TEAL));
+        hotspotToggle = tetheringSwitch("Wi-Fi hotspot");
+        hotspotControlStatus = label("Checking...", 11, false, MUTED);
+        hotspot.addView(hotspotToggle);
+        hotspot.addView(hotspotControlStatus);
+        LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, -2, 1f);
+        left.rightMargin = dp(4);
+        LinearLayout.LayoutParams right = new LinearLayout.LayoutParams(0, -2, 1f);
+        right.leftMargin = dp(4);
+        controls.addView(usb, left);
+        controls.addView(hotspot, right);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(12);
+        root.addView(controls, params);
+        usbToggle.setOnCheckedChangeListener((button, checked) -> {
+            if (!syncingToggles) changeTethering(TetheringControl.Target.USB, checked);
+        });
+        hotspotToggle.setOnCheckedChangeListener((button, checked) -> {
+            if (!syncingToggles) changeTethering(TetheringControl.Target.HOTSPOT, checked);
+        });
+    }
+
+    private Switch tetheringSwitch(String description) {
+        Switch toggle = new Switch(this);
+        toggle.setText("Unknown");
+        toggle.setTextColor(TEXT);
+        toggle.setTextSize(13);
+        toggle.setContentDescription(description);
+        toggle.setMinHeight(dp(48));
+        toggle.setEnabled(false);
+        toggle.setThumbTintList(new ColorStateList(new int[][] {
+                new int[] {android.R.attr.state_checked}, new int[0]
+        }, new int[] {ACCENT, MUTED}));
+        toggle.setTrackTintList(new ColorStateList(new int[][] {
+                new int[] {android.R.attr.state_checked}, new int[0]
+        }, new int[] {OUTLINE, SURFACE_HIGH}));
+        toggle.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(48)));
+        return toggle;
+    }
+
+    private void renderTetheringControls() {
+        if (usbToggle == null) return;
+        syncingToggles = true;
+        try {
+            renderTetheringControl(usbToggle, usbControlStatus, TetheringControl.Target.USB);
+            renderTetheringControl(hotspotToggle, hotspotControlStatus, TetheringControl.Target.HOTSPOT);
+        } finally {
+            syncingToggles = false;
+        }
+    }
+
+    private void renderTetheringControl(Switch toggle, TextView detail, TetheringControl.Target target) {
+        boolean known = tetheringState != null;
+        boolean enabled = known && tetheringState.enabled(target);
+        boolean changing = controlBusy && changingTarget == target;
+        toggle.setChecked(changing ? changingEnabled : enabled);
+        toggle.setText(changing ? (changingEnabled ? "Starting" : "Stopping")
+                : known ? (enabled ? "On" : "Off") : "Unknown");
+        toggle.setEnabled(known && !controlBusy);
+        detail.setText(changing ? (changingEnabled ? "Turning on..." : "Turning off...")
+                : controlBusy ? "Checking..."
+                : known ? (enabled ? "Tethering active" : "Tethering inactive") : "Status unavailable");
+    }
+
+    private void scheduleTetheringRefresh() {
+        if (!resumed) return;
+        controlHandler.removeCallbacks(refreshTetheringTask);
+        controlHandler.postDelayed(refreshTetheringTask, 500L);
+    }
+
+    private void refreshTetheringState() {
+        if (!resumed) return;
+        if (controlBusy) {
+            tetherRefreshPending = true;
+            return;
+        }
+        submitTethering(TetheringControl.Request.parse("status"));
+    }
+
+    private void changeTethering(TetheringControl.Target target, boolean enabled) {
+        if (controlBusy || isOperationInProgress()) {
+            renderTetheringControls();
+            return;
+        }
+        submitTethering(TetheringControl.Request.parse(
+                target == TetheringControl.Target.USB ? "usb" : "hotspot", enabled ? "on" : "off"));
+    }
+
+    private void submitTethering(TetheringControl.Request request) {
+        controlBusy = true;
+        changingTarget = request.action == TetheringControl.Action.STATUS ? null : request.target;
+        changingEnabled = request.action == TetheringControl.Action.ON;
+        renderTetheringControls();
+        TetheringController.execute(this, request, reply -> {
+            controlBusy = false;
+            changingTarget = null;
+            if (isDestroyed() || isFinishing()) return;
+            if (reply.ok) {
+                tetheringState = reply.state;
+                if (request.action != TetheringControl.Action.STATUS) {
+                    setStatus((request.target == TetheringControl.Target.USB ? "USB tethering" : "Hotspot")
+                            + (request.action == TetheringControl.Action.ON ? " enabled." : " disabled."));
+                }
+            } else {
+                if (request.action == TetheringControl.Action.STATUS) tetheringState = null;
+                setStatus(reply.error);
+                if (request.action != TetheringControl.Action.STATUS) scheduleTetheringRefresh();
+            }
+            renderTetheringControls();
+            if (tetherRefreshPending) {
+                tetherRefreshPending = false;
+                scheduleTetheringRefresh();
+            }
+        });
+    }
+
     private void applyInsets(ScrollView scroll, LinearLayout root) {
         ViewCompat.setOnApplyWindowInsetsListener(scroll, (view, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
@@ -230,7 +414,10 @@ public final class MainActivity extends Activity {
         titleRow.addView(label("Detected devices", 19, true, TEXT),
                 new LinearLayout.LayoutParams(0, -2, 1f));
         Button refresh = actionButton("Refresh", false);
-        refresh.setOnClickListener(v -> refreshAll());
+        refresh.setOnClickListener(v -> {
+            refreshAll();
+            scheduleTetheringRefresh();
+        });
         titleRow.addView(refresh);
         page.addView(titleRow);
 
@@ -746,27 +933,7 @@ public final class MainActivity extends Activity {
     }
 
     private String runRoot(String command) {
-        Process process = null;
-        try {
-            process = new ProcessBuilder("su", "-c", command)
-                    .redirectErrorStream(true).start();
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append('\n');
-                }
-            }
-            int code = process.waitFor();
-            if (code != 0) output.append("\nROOT_EXIT=").append(code);
-            return output.toString();
-        } catch (Throwable t) {
-            Log.e(TAG, "ROOT_COMMAND_FAILED", t);
-            return "ROOT_ERROR: " + t.getMessage();
-        } finally {
-            if (process != null) process.destroy();
-        }
+        return RootShell.run(command).legacyOutput();
     }
 
     private LinearLayout card() {

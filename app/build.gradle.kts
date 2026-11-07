@@ -30,8 +30,8 @@ android {
         applicationId = "uwu.waguri.hotspotmanager"
         minSdk = 29
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.6.8"
+        versionCode = 19
+        versionName = "0.6.9"
     }
 
     compileOptions {
