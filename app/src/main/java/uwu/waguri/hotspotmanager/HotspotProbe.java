@@ -133,6 +133,8 @@ public final class HotspotProbe extends XposedModule {
             Method servingInactive = stateMachineClass.getDeclaredMethod(
                     "handleInterfaceServingStateInactive", ipServerClass);
             Method interfaceName = ipServerClass.getDeclaredMethod("interfaceName");
+            Method servingMode = ipServerClass.getDeclaredMethod("servingMode");
+            Method downstreamMessage = ipServerClass.getMethod("sendMessage", int.class, Object.class);
             Method getHandler = stateMachineClass.getMethod("getHandler");
             Field retryField = stateMachineClass.getDeclaredField("CMD_RETRY_UPSTREAM");
             Field outerField = stateMachineClass.getDeclaredField("this$0");
@@ -141,12 +143,15 @@ public final class HotspotProbe extends XposedModule {
             servingActive.setAccessible(true);
             servingInactive.setAccessible(true);
             interfaceName.setAccessible(true);
+            servingMode.setAccessible(true);
+            downstreamMessage.setAccessible(true);
             getHandler.setAccessible(true);
             retryField.setAccessible(true);
             outerField.setAccessible(true);
             upstreamField.setAccessible(true);
             upstreamIfacesField.setAccessible(true);
             final int retryMessage = retryField.getInt(null);
+            final int connectionChanged = ipServerClass.getField("CMD_TETHER_CONNECTION_CHANGED").getInt(null);
             final int tetheredMode = getStaticInt(ipServerClass, "STATE_TETHERED", 2);
 
             hook(servingInactive).intercept(chain -> {
@@ -192,13 +197,29 @@ public final class HotspotProbe extends XposedModule {
                         boolean queued = handler.sendEmptyMessage(retryMessage);
                         Log.i(TAG, "USB_UPSTREAM_RETRY_SENT iface=rndis0 attempt="
                                 + attempt + " queued=" + queued);
-                    }, () -> {
-                        try {
-                            return upstreamField.get(tethering) != null
-                                    && upstreamIfacesField.get(tethering) != null;
-                        } catch (ReflectiveOperationException e) {
-                            Log.w(TAG, "USB_UPSTREAM_STATE_READ_FAILED", e);
-                            return false;
+                        if (!queued) return;
+                        // Run after native upstream selection, then rebuild only USB's cached binding.
+                        boolean posted = handler.post(() -> {
+                            try {
+                                if ((Integer) servingMode.invoke(ipServer) != tetheredMode) return;
+                                Object ifaces = upstreamIfacesField.get(tethering);
+                                if (upstreamField.get(tethering) == null || ifaces == null) return;
+                                usbRecovery.rebindOnce(stateMachine, ipServer, () -> {
+                                    ensureNativeUsbForwarding(tethering, loader);
+                                    try {
+                                        downstreamMessage.invoke(ipServer, connectionChanged, (Object) null);
+                                        downstreamMessage.invoke(ipServer, connectionChanged, ifaces);
+                                        Log.i(TAG, "USB_NATIVE_UPSTREAM_REBIND_QUEUED iface=rndis0 attempt=" + attempt + " upstream=" + ifaces);
+                                    } catch (ReflectiveOperationException error) {
+                                        throw new IllegalStateException("Native USB upstream rebind failed", error);
+                                    }
+                                });
+                            } catch (Throwable error) {
+                                Log.e(TAG, "USB_NATIVE_UPSTREAM_REBIND_FAILED", error);
+                            }
+                        });
+                        if (!posted) {
+                            Log.w(TAG, "USB_NATIVE_UPSTREAM_REBIND_SKIPPED handlerRejected=true");
                         }
                     });
                 } catch (Throwable t) {
@@ -215,6 +236,23 @@ public final class HotspotProbe extends XposedModule {
         }
 
         installUpstreamSelectionDiagnostics(loader);
+    }
+
+    private static void ensureNativeUsbForwarding(Object tethering, ClassLoader loader) {
+        try {
+            Field netdField = tethering.getClass().getDeclaredField("mNetd");
+            Field tagField = tethering.getClass().getDeclaredField("TAG");
+            netdField.setAccessible(true);
+            tagField.setAccessible(true);
+            Object netd = netdField.get(tethering);
+            Class<?> netdApi = Class.forName("android.net.INetd", false, loader);
+            boolean enabled = (Boolean) netdApi.getMethod("ipfwdEnabled").invoke(netd);
+            // Reusing the same native requester is idempotent and reapplies the kernel flags.
+            netdApi.getMethod("ipfwdEnableForwarding", String.class).invoke(netd, (String) tagField.get(null));
+            Log.i(TAG, "USB_NATIVE_FORWARDING_REFRESH iface=rndis0 enabledBefore=" + enabled);
+        } catch (Throwable error) {
+            Log.w(TAG, "USB_NATIVE_FORWARDING_CHECK_FAILED; continuing native USB rebind", error);
+        }
     }
 
     private void deoptimizeServingStateCallers(Class<?> stateMachineClass) {

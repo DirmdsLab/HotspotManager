@@ -82,15 +82,17 @@ final class TrafficEngine {
             }
         }
         Set<Integer> used = new HashSet<>();
-        for (Binding binding : bindings.values()) used.add(binding.pref);
+        for (Binding binding : bindings.values()) { used.add(binding.pref); used.add(binding.pref + 1); }
         boolean changed = false;
         for (TrafficRules.Client client : clients.values()) {
             if (bindings.containsKey(client.key())) continue;
             int slot = -1;
-            for (int pref = TrafficRules.FIRST_PREF; pref <= TrafficRules.LAST_PREF; pref++) {
-                if (!used.contains(pref)
+            for (int pref = TrafficRules.FIRST_PREF; pref < TrafficRules.LAST_PREF; pref += 2) {
+                if (!used.contains(pref) && !used.contains(pref + 1)
                         && TrafficRules.selectedFilter(part(client.iface + "_ingress"), pref).trim().isEmpty()
-                        && TrafficRules.selectedFilter(part(client.iface + "_egress"), pref).trim().isEmpty()) {
+                        && TrafficRules.selectedFilter(part(client.iface + "_egress"), pref).trim().isEmpty()
+                        && TrafficRules.selectedFilter(part(client.iface + "_ingress"), pref + 1).trim().isEmpty()
+                        && TrafficRules.selectedFilter(part(client.iface + "_egress"), pref + 1).trim().isEmpty()) {
                     slot = pref; break;
                 }
             }
@@ -106,12 +108,11 @@ final class TrafficEngine {
         long now = SystemClock.elapsedRealtime();
         Map<String, Rate> rates = new HashMap<>();
         for (Binding binding : bindings.values()) {
-            verifyOwned(binding.client.iface, "ingress", binding.pref);
-            verifyOwned(binding.client.iface, "egress", binding.pref);
-            long up = TrafficRules.acceptedBytes(TrafficRules.selectedFilter(part(binding.client.iface + "_ingress"), binding.pref));
-            long down = TrafficRules.acceptedBytes(TrafficRules.selectedFilter(part(binding.client.iface + "_egress"), binding.pref));
+            int downPref = TrafficRules.directionPref(binding.pref, "egress");
+            long up = TrafficRules.acceptedBytes(verifyOwned(binding.client.iface, "ingress", binding.pref));
+            long down = TrafficRules.acceptedBytes(verifyOwned(binding.client.iface, "egress", downPref));
             store.account(key(binding.client.iface, "ingress", binding.pref), up);
-            store.account(key(binding.client.iface, "egress", binding.pref), down);
+            store.account(key(binding.client.iface, "egress", downPref), down);
             double downMbps = TrafficRules.mbps(binding.lastDown, down, now - binding.lastTime);
             double upMbps = TrafficRules.mbps(binding.lastUp, up, now - binding.lastTime);
             rates.put(binding.client.key(), new Rate(downMbps, upMbps, binding.down, binding.up));
@@ -137,17 +138,18 @@ final class TrafficEngine {
             store.owned("owned_qdisc_" + iface, new JSONObject().put("boot", boot).put("ifindex", ifindex).toString());
         }
         for (String direction : new String[] {"ingress", "egress"}) {
-            String existing = readFilter(iface, direction, binding.pref);
+            int pref = TrafficRules.directionPref(binding.pref, direction);
+            String existing = readFilter(iface, direction, pref);
             if (!existing.trim().isEmpty()) throw new IllegalStateException("Conflicting tc filter; existing rule was not replaced.");
-            String key = key(iface, direction, binding.pref);
+            String key = key(iface, direction, pref);
             String cookie = java.util.UUID.randomUUID().toString().replace("-", "");
             JSONObject record = new JSONObject().put("boot", boot).put("ifindex", ifindex)
-                    .put("iface", iface).put("direction", direction).put("pref", binding.pref)
+                    .put("iface", iface).put("direction", direction).put("pref", pref)
                     .put("ip", binding.client.ip).put("mac", binding.client.mac).put("cookie", cookie).put("pending", true);
             store.owned(key, record.toString());
             // Prove cookie/counter support with a non-dropping rule before applying any cap.
-            mutate(iface, ifindex, TrafficRules.filter(binding.client, direction, binding.pref, 0, cookie));
-            String installed = readFilter(iface, direction, binding.pref);
+            mutate(iface, ifindex, TrafficRules.filter(binding.client, direction, pref, 0, cookie));
+            String installed = TrafficRules.ownedLeaf(readFilter(iface, direction, pref), cookie);
             if (!TrafficRules.hasCookie(installed, cookie)) {
                 throw new IllegalStateException("tc ownership cookies are not readable. No speed cap was requested.");
             }
@@ -156,13 +158,11 @@ final class TrafficEngine {
             store.owned(key, record.toString());
             int rate = direction.equals("ingress") ? binding.up : binding.down;
             if (rate > 0) {
-                java.util.regex.Matcher handle = java.util.regex.Pattern.compile("\\bfh\\s+([0-9a-f]{1,3}::[0-9a-f]{1,3})\\b").matcher(installed);
-                if (!handle.find()) throw new IllegalStateException("Cannot identify the owned u32 filter handle.");
-                String changed = TrafficRules.filter(binding.client, direction, binding.pref, rate, cookie)
+                String changed = TrafficRules.filter(binding.client, direction, pref, rate, cookie)
                         .replace("tc filter add ", "tc filter replace ")
-                        .replace(" u32 match ", " handle " + handle.group(1) + " u32 match ");
+                        .replace(" u32 match ", " handle " + TrafficRules.leafHandle(installed) + " u32 match ");
                 mutate(iface, ifindex, changed);
-                installed = readFilter(iface, direction, binding.pref);
+                installed = TrafficRules.ownedLeaf(readFilter(iface, direction, pref), cookie);
                 if (!TrafficRules.hasCookie(installed, cookie)) throw new IllegalStateException("Updated filter ownership was lost.");
                 TrafficRules.acceptedBytes(installed);
                 record.put("fingerprint", TrafficRules.fingerprint(installed));
@@ -172,25 +172,28 @@ final class TrafficEngine {
     }
 
     private void remove(Binding binding) throws Exception {
-        for (String direction : new String[] {"ingress", "egress"}) removeRecorded(key(binding.client.iface, direction, binding.pref));
+        for (String direction : new String[] {"ingress", "egress"}) removeRecorded(key(binding.client.iface, direction,
+                TrafficRules.directionPref(binding.pref, direction)));
     }
 
     private void capture(Binding binding) throws Exception {
         for (String direction : new String[] {"ingress", "egress"}) {
-            verifyOwned(binding.client.iface, direction, binding.pref);
-            store.account(key(binding.client.iface, direction, binding.pref), TrafficRules.acceptedBytes(
-                    TrafficRules.selectedFilter(part(binding.client.iface + "_" + direction), binding.pref)));
+            int pref = TrafficRules.directionPref(binding.pref, direction);
+            store.account(key(binding.client.iface, direction, pref), TrafficRules.acceptedBytes(
+                    verifyOwned(binding.client.iface, direction, pref)));
         }
     }
 
-    private void verifyOwned(String iface, String direction, int pref) throws Exception {
+    private String verifyOwned(String iface, String direction, int pref) throws Exception {
         String raw = store.prefs.getString(key(iface, direction, pref), null);
         if (raw == null) throw new IllegalStateException("Traffic rule ownership was lost.");
         JSONObject record = new JSONObject(raw);
-        String actual = TrafficRules.fingerprint(TrafficRules.selectedFilter(part(iface + "_" + direction), pref));
+        String leaf = TrafficRules.ownedLeaf(TrafficRules.selectedFilter(part(iface + "_" + direction), pref), record.getString("cookie"));
+        String actual = TrafficRules.fingerprint(leaf);
         if (!actual.equals(record.optString("fingerprint")) || actual.isEmpty()) {
             throw new IllegalStateException("A traffic filter changed outside the app; measurements are unavailable.");
         }
+        return leaf;
     }
 
     private void cleanupRecorded() throws Exception {
@@ -232,17 +235,22 @@ final class TrafficEngine {
         String actual = readFilter(iface, direction, pref);
         if (actual.trim().isEmpty()) { store.owned(key, null); return; }
         String cookie = record.optString("cookie");
-        if (!TrafficRules.ownsPreference(actual, cookie)) {
+        String leaf;
+        try { leaf = TrafficRules.ownedLeaf(actual, cookie); }
+        catch (IllegalStateException error) {
             android.util.Log.e("WaguriTraffic", "Ownership check: " + iface + " " + direction + " pref=" + pref
                     + " expectedCookie=" + cookie + " kernel=" + actual);
             throw new IllegalStateException("Kernel ownership mismatch on " + iface + " " + direction + " pref " + pref + "; existing filter retained. See WaguriTraffic log.");
         }
-        try { store.account(key, TrafficRules.acceptedBytes(actual)); }
+        try { store.account(key, TrafficRules.acceptedBytes(leaf)); }
         catch (Exception error) {
             TrafficService.usageWarning = "Usage checkpoint failed: " + error.getMessage();
             android.util.Log.e("WaguriTraffic", TrafficService.usageWarning, error);
         }
-        mutate(iface, record.getString("ifindex"), TrafficRules.delete(iface, direction, pref));
+        // Legacy u32 dumps can contain both directions' leaves under the same priority.
+        String deletion = TrafficRules.ownsPreference(actual, cookie) ? TrafficRules.delete(iface, direction, pref)
+                : TrafficRules.deleteLeaf(iface, direction, pref, leaf);
+        mutate(iface, record.getString("ifindex"), deletion);
         store.owned(key, null);
     }
 

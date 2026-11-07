@@ -1,4 +1,4 @@
-# Device profiles in Hotspot Manager 0.8.1
+# Device profiles in Hotspot Manager 0.8.2
 
 ## Existing controls retained
 
@@ -108,7 +108,7 @@ that a cap is being enforced. See TRAFFIC_STATUS.md.
 
 ## Features intentionally skipped
 
-| Requested feature | Status in 0.8.1 |
+| Requested feature | Status in 0.8.2 |
 |---|---|
 | Exact connection start time | Not reported by the native client/lease metadata used here. No lease-expiration subtraction or first-observation estimate is substituted. |
 | Historical unmonitored usage | Not available. Recorded IPv4 usage is now accumulated persistently per IP/MAC only from observed monitor counters. |

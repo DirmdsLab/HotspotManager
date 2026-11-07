@@ -1,9 +1,31 @@
-# Hotspot Manager 0.8.1
+# Hotspot Manager 0.8.2
 
 A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
 networks and live DHCP reservations. Intended device: Infinix with MediaTek
 Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
 Tethering and NetworkStack class layout used by this project.
+
+## Version 0.8.2 USB-first forwarding and shared-U32 repair
+
+- Fix the confirmed monitoring failure: this kernel's U32 dump can include both
+  clsact directions when they use the same priority. Select one exact leaf by its
+  full cookie before reading its two action counters or checking its fingerprint.
+- Allocate separate even/odd priorities for upload/download, preventing new
+  directions from sharing a U32 priority. Keep existing speed limits and usage.
+- Reconcile legacy shared-priority filters by deleting only the verified owned
+  leaf when another leaf is present. Retain foreign rules and root qdiscs.
+- Run all three bounded USB upstream refreshes at 2.5, 5 and 10 seconds. A selected
+  network alone is no longer treated as proof of working USB forwarding.
+- Once per active USB session, reassert native IP forwarding using Android's
+  existing requester, then queue a USB-only native upstream clear/rebind after
+  selection. This rebuilds forwarding/NAT despite an unchanged cached interface
+  set. Native upstream selection also refreshes DNS forwarders.
+
+Update with the existing signing key and reboot Android to load the new Vector
+hooks and clear old transient filters. Test USB first with hotspot off. Wait up
+to 10 seconds; test the gateway, a public IP and DNS separately. Start Software
+QoS monitoring after USB connectivity works. No hotspot toggle is automated.
+Physical Infinix validation of these changes is still required.
 
 ## Version 0.8.1 monitoring repair and usage
 
@@ -109,14 +131,15 @@ The previous recovery hook looked up `handleInterfaceServingStateActive` on
 `Tethering$TetherMainSM` class, so the old hook could fail to install before
 queuing any recovery message.
 
-Version 0.6.8:
+Current recovery (updated in 0.8.2):
 
 - Hooks the active and inactive downstream methods on `TetherMainSM`.
 - Sends the native `CMD_RETRY_UPSTREAM` message through that state machine's
   own handler. Android performs upstream selection and DNS-forwarder setup.
-- Performs one refresh 2.5 seconds after USB becomes tethered, even when an
-  upstream is already selected. If upstream network/interface selection is
-  still unavailable, retries at 5 and 10 seconds, then stops.
+- Performs native refreshes at 2.5, 5 and 10 seconds even when an upstream has
+  already been selected. After selection, reasserts forwarding once per active
+  USB session with Android's existing requester and queues a USB-only native
+  clear/rebind to reinstall forwarding/NAT through IpServer.
 - Cancels pending callbacks when that USB downstream stops. Duplicate active
   notifications do not create additional retry sequences.
 - Deoptimizes the native serving-state callers so compiled call sites can
@@ -127,7 +150,7 @@ Version 0.6.8:
   IPv4 address exists yet. An absent upstream is not a subnet conflict;
   detected overlaps and enumeration failures still use Android's address.
 
-This fixes a verified hook-target error in the source. It has not been tested
+This retains the hook-target fix and adds native USB forwarding recovery. It has not been tested
 on the physical Infinix firmware. OEM class or signature changes are reported
 by the hook-installation logs rather than silently treated as success.
 
@@ -139,7 +162,8 @@ https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/h
 - Cache parsed reservation snapshots by exact Settings.Global content and
   interface. Configuration changes remain live; clearing settings invalidates
   cached reservations. Unchanged invalid JSON is not repeatedly parsed/logged.
-- Resolve DNS parcel fields and USB hook reflection once during installation.
+- Cache DNS parcel fields and the core USB hook reflection during installation.
+  The optional native forwarding refresh runs once per active USB session.
 - Prevent reservation changes while another refresh/save is in progress.
 - Make private release-signing files optional, so the source package can build
   without the original developer's keystore.
@@ -181,7 +205,7 @@ pool. A client must renew DHCP or reconnect after its reservation changes.
 ## Included release artifact
 
 The fixed source distribution includes
-`artifacts/HotspotManager-0.8.1-unsigned.apk`. Sign it before installation using
+`artifacts/HotspotManager-0.8.2-unsigned.apk`. Sign it before installation using
 the instructions below. `VALIDATION.md` records the completed checks and their
 limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 
@@ -270,6 +294,8 @@ Interpretation:
 - `USB_UPSTREAM_RECOVERY_HOOK_INSTALLED` confirms hook registration.
 - `USB_UPSTREAM_RETRY_QUEUED ... queued=true` confirms a pending callback.
 - `USB_UPSTREAM_RETRY_SENT ... queued=true` confirms a native retry was sent.
+- `USB_NATIVE_FORWARDING_REFRESH` confirms the native forwarding requester was reapplied.
+- `USB_NATIVE_UPSTREAM_REBIND_QUEUED` confirms a USB-only native binding reset was queued.
 - `UPSTREAM_SELECTION` records the selected upstream network and interfaces.
 - `DNS_DHCP_FIXED iface=rndis0` confirms the DHCP DNS parcel was patched.
 

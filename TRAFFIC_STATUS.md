@@ -1,4 +1,4 @@
-# IPv4 speed and rate control in 0.8.1
+# IPv4 speed and rate control in 0.8.2
 
 ## What the diagnostic established
 
@@ -9,16 +9,22 @@ Native BPF accounting is keyed by upstream interface; it does not supply a
 separate instantaneous speed for every client IP. The diagnostic contained no
 proof that a new software limiter would intercept accelerated traffic.
 
-Version 0.8.1 reads the kernel's full ownership cookies and accepted-byte counters
-through RTM_GETTFILTER netlink dumps. It no longer depends on the formatting of
-vendor tc statistics output. The supplied log confirms normal DHCP/upstream
-activity but contains no traffic filter dump, so the precise old mismatch could
-not be independently reproduced. The new path removes that text-parser dependency
-and preserves the original error when cleanup also fails.
+The latest supplied runtime dump confirms that U32 walks can return upload and
+download leaves together under the same priority. Both full cookies were present;
+treating the entire priority as one rule caused four counters and a false cleanup
+conflict. Linux 5.10 U32 common-table walking filters by priority, and clsact's two
+directions can share that common storage.
 
-The implementation provides an explicit Software QoS mode. It is off
-by default. The original DHCP, gateway, DNS, reservations, USB-first recovery,
-GUI switches, and ADB tethering commands are retained.
+Version 0.8.2 selects exactly one leaf by its full cookie for accounting and
+fingerprints, and allocates different upload/download priorities. Legacy shared
+priorities use exact-leaf cleanup when another leaf is present. Regression tests
+reproduce the shared-table structure with synthetic identifiers.
+
+The software mode remains explicit and off by default. Original gateways, DHCP,
+DNS addresses, reservations, GUI switches and ADB controls are retained. USB-first
+recovery now performs all three native refreshes and a single USB-only native
+upstream rebind per session. The supplied client log also shows public-IP failure
+before hotspot use, so that failure is broader than DNS alone.
 
 ## Enable and use
 
@@ -104,13 +110,17 @@ reconciled on the next start. There is no data-quota enforcement.
 ## Ownership and recovery
 
 The app retains native root qdiscs and existing BPF/other filters. It allocates
-unoccupied IPv4 priorities 50000–50127 on clsact ingress/egress. Random action
+unoccupied IPv4 priority pairs in 50000–50127, using the even priority for ingress
+and the following odd priority for egress. Both priorities are checked in both
+dumps before allocation; up to 64 bindings fit before external reservations. Random action
 cookies, kernel boot identity, interface index, and rule fingerprints are saved
 for ownership checks. A non-dropping meter proves full kernel cookie/counter readback before
 any speed cap is requested. A failure stops monitoring and attempts cleanup.
 
-Cleanup removes only a priority verified to contain a single owned leaf filter.
-Conflicting/shared state is retained and reported. An app-created empty clsact
+Cleanup removes a complete priority only when its sole leaf is owned. When a
+legacy dump includes other leaves, it deletes only the selected owned handle.
+A missing/duplicate ownership cookie is reported; foreign leaves are retained.
+An empty legacy hash table may remain until reboot rather than deleting shared state. An app-created empty clsact
 is removed only when no ingress/egress filters remain. Existing clsact qdiscs and
 native root mq/pfifo_fast qdiscs are retained. No global firewall/NAT/routing
 rewrite or native BPF map edit is performed.
@@ -191,3 +201,10 @@ included in this source package and is never collected automatically.
   https://android.googlesource.com/kernel/common/+/refs/heads/android12-5.10/include/uapi/linux/pkt_cls.h
 - Android netlink socket addresses:
   https://android.googlesource.com/platform/libcore/+/refs/heads/android16-release/luni/src/main/java/android/system/NetlinkSocketAddress.java
+
+- Shared U32 classifier initialization and walking:
+  https://android.googlesource.com/kernel/common/+/refs/heads/android12-5.10/net/sched/cls_u32.c
+- Native IpServer cached-upstream comparison and forwarding rebuild:
+  https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/android16-release/Tethering/src/android/net/ip/IpServer.java
+- Native forwarding requester idempotence:
+  https://android.googlesource.com/platform/system/netd/+/master/server/TetherController.cpp

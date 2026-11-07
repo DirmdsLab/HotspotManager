@@ -85,6 +85,44 @@ final class TrafficRules {
         return "tc filter del dev " + iface + " " + direction + " protocol ip pref " + pref;
     }
 
+    static int directionPref(int base, String direction) {
+        if ((base & 1) != 0) throw new IllegalArgumentException("Expected an even priority base.");
+        int pref = base + ("egress".equals(direction) ? 1 : 0);
+        validateDirection(direction, pref);
+        return pref;
+    }
+
+    static String ownedLeaf(String text, String cookie) {
+        String found = null;
+        StringBuilder leaf = new StringBuilder();
+        for (String line : (text + "\nfilter END\n").split("\\r?\\n")) {
+            if (line.startsWith("filter ")) {
+                if (hasCookie(leaf.toString(), cookie)) {
+                    if (found != null) throw new IllegalStateException("Duplicate ownership cookie in kernel filters.");
+                    found = leaf.toString();
+                }
+                leaf.setLength(0);
+            }
+            leaf.append(line).append('\n');
+        }
+        if (found == null || !ownsPreference(found, cookie)) throw new IllegalStateException("The owned kernel leaf was not found.");
+        return found;
+    }
+
+    static String leafHandle(String leaf) {
+        Matcher handle = Pattern.compile("\\bfh\\s+([0-9a-f]{1,3}::[0-9a-f]{1,3})\\b").matcher(leaf);
+        if (!handle.find()) throw new IllegalStateException("Cannot identify the owned u32 leaf handle.");
+        String value = handle.group(1);
+        if (handle.find()) throw new IllegalStateException("Ambiguous u32 leaf handle.");
+        return value;
+    }
+
+    static String deleteLeaf(String iface, String direction, int pref, String leaf) {
+        show(iface, direction, pref);
+        return "tc filter del dev " + iface + " " + direction + " protocol ip pref " + pref
+                + " handle " + leafHandle(leaf) + " u32";
+    }
+
     private static void validateDirection(String direction, int pref) {
         if (!("ingress".equals(direction) || "egress".equals(direction)) || pref < FIRST_PREF || pref > LAST_PREF) {
             throw new IllegalArgumentException("Invalid owned filter identifier.");

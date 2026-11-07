@@ -50,6 +50,47 @@ public final class TrafficRulesTest {
         assertFalse(TrafficRules.ownsPreference(FILTER.replace(COOKIE, "ffffffffffffffffffffffffffffffff"), COOKIE));
     }
 
+    @Test public void sharedClsactDumpIsSplitByLeafCookieBeforeReadingCounters() {
+        String other = "fedcba9876543210fedcba9876543210";
+        String down = FILTER.replace(COOKIE, other).replace("800:", "801:").replace("1000000 bytes", "2000000 bytes");
+        String both = "filter protocol ip pref 50000 u32 chain 0 fh 0:\n" + down + FILTER;
+        assertThrows(IllegalStateException.class, () -> TrafficRules.acceptedBytes(both));
+        assertEquals(1000000, TrafficRules.acceptedBytes(TrafficRules.ownedLeaf(both, COOKIE)));
+        assertEquals(2000000, TrafficRules.acceptedBytes(TrafficRules.ownedLeaf(both, other)));
+        assertEquals("800::800", TrafficRules.leafHandle(TrafficRules.ownedLeaf(both, COOKIE)));
+        assertEquals("801::800", TrafficRules.leafHandle(TrafficRules.ownedLeaf(both, other)));
+    }
+
+    @Test public void sharedPriorityCleanupDeletesOnlyTheSelectedLeaf() {
+        String other = FILTER.replace(COOKIE, "fedcba9876543210fedcba9876543210").replace("800:", "801:");
+        String both = other + FILTER;
+        assertFalse(TrafficRules.ownsPreference(both, COOKIE));
+        String delete = TrafficRules.deleteLeaf("rndis0", "ingress", 50000, TrafficRules.ownedLeaf(both, COOKIE));
+        assertEquals("tc filter del dev rndis0 ingress protocol ip pref 50000 handle 800::800 u32", delete);
+        assertFalse(delete.contains("801::800"));
+    }
+
+    @Test public void missingAndDuplicateLeafOwnershipFailClosed() {
+        assertThrows(IllegalStateException.class, () -> TrafficRules.ownedLeaf(FILTER, "ffffffffffffffffffffffffffffffff"));
+        assertThrows(IllegalStateException.class, () -> TrafficRules.ownedLeaf(FILTER + FILTER.replace("800:", "801:"), COOKIE));
+        assertEquals(1000000, TrafficRules.acceptedBytes(TrafficRules.ownedLeaf(FILTER.trim(), COOKIE)));
+    }
+
+    @Test public void directionsUseDifferentPrioritiesWithinEachReservedPair() {
+        assertEquals(50000, TrafficRules.directionPref(50000, "ingress"));
+        assertEquals(50001, TrafficRules.directionPref(50000, "egress"));
+        assertEquals(50127, TrafficRules.directionPref(50126, "egress"));
+        assertThrows(IllegalArgumentException.class, () -> TrafficRules.directionPref(50001, "ingress"));
+        assertThrows(IllegalArgumentException.class, () -> TrafficRules.directionPref(50128, "egress"));
+        assertThrows(IllegalArgumentException.class, () -> TrafficRules.directionPref(50000, "root;id"));
+    }
+
+    @Test public void sharedTableHeadersAndOtherDirectionDoNotChangeAnOwnedFingerprint() {
+        String other = FILTER.replace(COOKIE, "fedcba9876543210fedcba9876543210").replace("800:", "801:");
+        assertEquals(TrafficRules.fingerprint(TrafficRules.ownedLeaf(FILTER, COOKIE)),
+                TrafficRules.fingerprint(TrafficRules.ownedLeaf(other + FILTER, COOKIE)));
+    }
+
     @Test public void preferencesKeepNativeBpfAndOtherFiltersSeparate() {
         String all = "filter protocol ip pref 3 bpf chain 0 handle 0x1\n  Sent 5 bytes 1 pkt\n"
                 + FILTER + "filter protocol ip pref 50001 u32 fh 801::800\n";
