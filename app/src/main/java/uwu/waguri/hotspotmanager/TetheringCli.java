@@ -55,7 +55,9 @@ public final class TetheringCli {
     }
 
     private static Context systemContext() throws Exception {
-        if (Looper.myLooper() == null) Looper.prepareMainLooper();
+        // ActivityThread uses this thread's looper for the system Context.
+        // Tethering callbacks use explicit executors and do not need a process main looper.
+        if (Looper.myLooper() == null) Looper.prepare();
         Class<?> threadClass = Class.forName("android.app.ActivityThread");
         Method systemMain = threadClass.getDeclaredMethod("systemMain");
         systemMain.setAccessible(true);
@@ -73,9 +75,9 @@ public final class TetheringCli {
         final String[] usbRegexes;
 
         NativeBackend(Context context) throws Exception {
-            manager = context.getSystemService(Context.TETHERING_SERVICE);
-            if (manager == null) throw new IllegalStateException("Android tethering service is unavailable.");
             managerClass = Class.forName("android.net.TetheringManager");
+            manager = context.getSystemService(managerClass);
+            if (manager == null) throw new IllegalStateException("Android tethering service is unavailable.");
             // Do not report both switches as off if the service never supplies an initial state.
             CountDownLatch initialState = new CountDownLatch(1);
             Class<?> events = Class.forName("android.net.TetheringManager$TetheringEventCallback");

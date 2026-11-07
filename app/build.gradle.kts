@@ -30,8 +30,8 @@ android {
         applicationId = "uwu.waguri.hotspotmanager"
         minSdk = 29
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.6.9"
+        versionCode = 20
+        versionName = "0.6.10"
     }
 
     compileOptions {
@@ -70,4 +70,9 @@ dependencies {
     implementation("androidx.core:core:1.15.0")
     compileOnly("io.github.libxposed:api:102.0.0")
     testImplementation("junit:junit:4.13.2")
+}
+
+// Report the exact deprecated call if one is introduced in a future change.
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("-Xlint:deprecation")
 }

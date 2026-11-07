@@ -1,4 +1,4 @@
-# Validation results: Hotspot Manager 0.6.9
+# Validation results: Hotspot Manager 0.6.10
 
 Validation date: 2026-11-07 (Asia/Jakarta).
 
@@ -7,17 +7,17 @@ Validation date: 2026-11-07 (Asia/Jakarta).
 - JDK: Eclipse Temurin 17; Gradle: 8.13.
 - Android Gradle Plugin: 8.13.2; SDK platform: 36; build tools: 36.0.0.
 - Application ID: `uwu.waguri.hotspotmanager`.
-- Version: `0.6.9`; version code: `19`.
+- Version: `0.6.10`; version code: `20`.
 
 ## Completed checks
 
 ```bash
-./gradlew :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
+./gradlew :app:clean :app:assembleRelease :app:testDebugUnitTest :app:lintRelease
 ```
 
 - Release build: passed.
 - Unit tests: 24 passed, 0 failed, 0 errors, 0 skipped.
-- Android lint: 0 errors, 27 warnings; no baseline or blanket suppression added.
+- Android lint: 0 errors, 26 warnings; no baseline or blanket suppression added.
 - APK: non-debuggable; unsigned; 4-byte ZIP alignment check passed.
 - Compiled APK manifest: explicit exported TetheringReceiver requires DUMP permission.
 - APK DEX: CLI, receiver, and command-control classes are present.
@@ -41,7 +41,6 @@ retry lifecycle tests are retained.
 - `DiscouragedPrivateApi`: 5.
 - `IconLauncherShape`: 5.
 - `IconLocation`: 1.
-- `InlinedApi`: 1.
 - `MonochromeLauncherIcon`: 1.
 - `ObsoleteSdkInt`: 1.
 - `PrivateApi`: 9.
@@ -49,12 +48,35 @@ retry lifecycle tests are retained.
 - `StaticFieldLeak`: 1.
 
 Warnings include intentional framework reflection for the root/Vector helpers,
-the inlined TETHERING_SERVICE constant (the service exists on the targeted
-Android 16 runtime), existing launcher/backup metadata, application/system-context
-caching, and English-only UI string construction. The root helper prepares a main
-looper for ActivityThread.systemMain; this standalone-process initialization uses
-a deprecated platform method. No global hidden-API policy or system settings are
-changed to enable reflection.
+existing launcher/backup metadata, application/system-context caching, and
+English-only UI string construction. The API 36 service-name constant warning
+has been removed by using class-based service lookup.
+
+## Deprecation verification
+
+- Both release and debug Java were recompiled after `:app:clean`.
+- `-Xlint:deprecation` was enabled for all JavaCompile tasks.
+- No deprecated-API compiler notes or deprecation warnings were emitted.
+- Release bytecode invokes `Looper.prepare()` and contains no call to
+  `prepareMainLooper()`.
+- No suppression or warning-disable flag was added for this change.
+- The GUI, receiver, command engine, and USB-first hooks retain their behavior;
+  only root-context initialization and service lookup changed.
+
+AOSP Android 16 source shows ActivityThread capturing `Looper.myLooper()` and
+ContextImpl returning that looper from `getMainLooper()`. This helper passes
+explicit executors for Binder callbacks, so a process-global main looper is not
+needed for its tethering calls. Physical-firmware validation remains required.
+
+References:
+
+- https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/core/java/android/app/ActivityThread.java
+- https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android16-release/core/java/android/app/ContextImpl.java
+
+The lint HTML-report location is informational output. Gradle's Problems report
+is also a diagnostic artifact; its existence is not a build failure. The final
+clean build did not emit the previous Java deprecation diagnostics or a new
+Problems-report announcement.
 
 ## Required physical-device validation
 
@@ -78,6 +100,6 @@ Test after signing, installing, granting app root access, and rebooting:
 
 ## Prebuilt artifact
 
-`artifacts/HotspotManager-0.6.9-unsigned.apk` requires signing before installation.
+`artifacts/HotspotManager-0.6.10-unsigned.apk` requires signing before installation.
 Use the same key as the installed app for an in-place update. No private key is
 included. The pre-signing digest is in `artifacts/SHA256SUMS`; signing changes it.
