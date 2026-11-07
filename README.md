@@ -221,3 +221,31 @@ Do not commit the keystore or properties file to source control.
 - Launcher and in-app display name: `Hotspot Manager`.
 - Application ID and namespace remain `uwu.waguri.hotspotmanager`.
 - The runtime tethering and DHCP implementation is unchanged from v0.6.6.
+
+
+
+SETUP
+
+
+…/HotspotManager
+0s ❯ podman run -it \                                                                                 12:04
+           --name infinix-hotspot-build \
+           -v "/home/tutturuu/File/Code/DirmdsLab/HotspotManager:/workspace/HotspotManager:Z" \
+           -v "/home/tutturuu/File/Software/App/env/Android/Key-HotspotManager:/workspace/key:Z" \
+           -w /workspace \
+           ghcr.io/cirruslabs/android-sdk:36 \
+           bash
+
+apt-get update && apt-get install -y wget unzip
+
+wget https://services.gradle.org/distributions/gradle-8.13-bin.zip \
+  -O /tmp/gradle.zip
+
+unzip -q /tmp/gradle.zip -d /opt
+
+ln -sf /opt/gradle-8.13/bin/gradle /usr/local/bin/gradle
+
+
+
+
+gradle clean :app:assembleRelease
