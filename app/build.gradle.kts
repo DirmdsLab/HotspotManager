@@ -30,8 +30,8 @@ android {
         applicationId = "uwu.waguri.hotspotmanager"
         minSdk = 29
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.8.2"
+        versionCode = 26
+        versionName = "0.8.3"
     }
 
     compileOptions {
@@ -70,6 +70,7 @@ dependencies {
     implementation("androidx.core:core:1.15.0")
     compileOnly("io.github.libxposed:api:102.0.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 // Report the exact deprecated call if one is introduced in a future change.

@@ -28,12 +28,13 @@ final class TrafficEngine {
         final int pref;
         final int down;
         final int up;
+        final String session;
         String ifindex;
         long lastDown = -1;
         long lastUp = -1;
         long lastTime;
-        Binding(TrafficRules.Client client, int pref, int down, int up) {
-            this.client = client; this.pref = pref; this.down = down; this.up = up;
+        Binding(TrafficRules.Client client, int pref, int down, int up, String session) {
+            this.client = client; this.pref = pref; this.down = down; this.up = up; this.session = session;
         }
     }
     private final Context context;
@@ -62,21 +63,25 @@ final class TrafficEngine {
     Map<String, Rate> tick() throws Exception {
         TrafficMode.verifyReady(context);
         batch = readBatch();
-        // Capture the old rule before a rate-policy change replaces its counters.
-        for (Binding binding : bindings.values()) {
-            if (part(binding.client.iface + "_index").trim().equals(binding.ifindex)) capture(binding);
-        }
+        TrafficSessionSnapshot sessions = TrafficSessionSnapshot.read(context);
         Map<String, TrafficRules.Client> clients = new LinkedHashMap<>();
         for (String iface : TrafficRules.IFACES) {
             for (TrafficRules.Client client : TrafficRules.neighbors(iface, part(iface + "_neighbors"))) {
-                clients.put(client.key(), client);
+                // STALE ARP entries can outlive a physical disconnect.
+                if (sessions.token(iface, client.mac) != null) clients.put(client.key(), client);
             }
+        }
+        store.refreshSessions(sessions, clients.values());
+        // Checkpoint old rules before a policy change or connection generation replaces them.
+        for (Binding binding : bindings.values()) {
+            if (part(binding.client.iface + "_index").trim().equals(binding.ifindex)) capture(binding);
         }
         for (Binding binding : new ArrayList<>(bindings.values())) {
             TrafficRules.Client client = clients.get(binding.client.key());
             int[] limits = store.limits(binding.client.mac);
             if (client == null || !part(binding.client.iface + "_index").trim().equals(binding.ifindex)
-                    || limits[0] != binding.down || limits[1] != binding.up) {
+                    || limits[0] != binding.down || limits[1] != binding.up
+                    || !binding.session.equals(sessions.token(binding.client.iface, binding.client.mac))) {
                 remove(binding);
                 bindings.remove(binding.client.key());
             }
@@ -98,10 +103,11 @@ final class TrafficEngine {
             }
             if (slot < 0) throw new IllegalStateException("No unoccupied app filter priority is available.");
             int[] limits = store.limits(client.mac);
-            Binding binding = new Binding(client, slot, limits[0], limits[1]);
+            Binding binding = new Binding(client, slot, limits[0], limits[1], sessions.token(client.iface, client.mac));
             install(binding);
             bindings.put(client.key(), binding);
             used.add(slot);
+            used.add(slot + 1);
             changed = true;
         }
         if (changed) batch = readBatch();
@@ -145,7 +151,7 @@ final class TrafficEngine {
             String cookie = java.util.UUID.randomUUID().toString().replace("-", "");
             JSONObject record = new JSONObject().put("boot", boot).put("ifindex", ifindex)
                     .put("iface", iface).put("direction", direction).put("pref", pref)
-                    .put("ip", binding.client.ip).put("mac", binding.client.mac).put("cookie", cookie).put("pending", true);
+                    .put("ip", binding.client.ip).put("mac", binding.client.mac).put("session", binding.session).put("cookie", cookie).put("pending", true);
             store.owned(key, record.toString());
             // Prove cookie/counter support with a non-dropping rule before applying any cap.
             mutate(iface, ifindex, TrafficRules.filter(binding.client, direction, pref, 0, cookie));

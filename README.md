@@ -1,9 +1,34 @@
-# Hotspot Manager 0.8.2
+# Hotspot Manager 0.8.3
 
 A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
 networks and live DHCP reservations. Intended device: Infinix with MediaTek
 Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
 Tethering and NetworkStack class layout used by this project.
+
+## Version 0.8.3 download burst and connection usage
+
+- Increase only the download policer's burst from a one-aggregate minimum / 100 ms
+  budget to a four-aggregate minimum / 500 ms budget. The configured rate is
+  unchanged: 5 Mbps still installs 5000 kbit/s. Upload parameters are unchanged.
+  This targets avoidable clustered TCP drops; it is not a guaranteed application
+  goodput correction or a hidden rate multiplier. Native root qdiscs are retained.
+- Replace the historical per-IP usage row with **Current session IPv4 usage**.
+  Wi-Fi association events and native USB tethering lifecycle events supply
+  connection generations, including disconnect/reconnect between monitor polls.
+  Sessions are per interface and MAC; changing IP or rate policy keeps the session.
+- Keep **Total this MAC IPv4 usage** below it, preserving existing recorded MAC
+  totals and accumulating across addresses, interfaces, reconnects and app updates.
+- Deliver native session snapshots through an explicit receiver protected by
+  `TETHER_PRIVILEGED`. The tethering process does not need write access to global
+  settings. Missing native events are shown as unavailable rather than inferred
+  from stale ARP entries. Both rows count observed IPv4 bytes while monitored.
+
+Update with the same signing key, keep app data, and reboot to load the Vector
+hooks. Open the app once, reconnect clients and start monitoring. If Software
+QoS was already prepared, its settings and rate policies are retained. Test
+sustained IPv4 download at 5 and 8 Mbps for at least 60 seconds after warm-up.
+A larger bucket permits brief overshoot; TCP, radio conditions and protocol
+headers can still make application payload rates lower than the cap.
 
 ## Version 0.8.2 USB-first forwarding and shared-U32 repair
 
@@ -205,7 +230,7 @@ pool. A client must renew DHCP or reconnect after its reservation changes.
 ## Included release artifact
 
 The fixed source distribution includes
-`artifacts/HotspotManager-0.8.2-unsigned.apk`. Sign it before installation using
+`artifacts/HotspotManager-0.8.3-unsigned.apk`. Sign it before installation using
 the instructions below. `VALIDATION.md` records the completed checks and their
 limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 

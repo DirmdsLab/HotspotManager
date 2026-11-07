@@ -1,4 +1,4 @@
-# Device profiles in Hotspot Manager 0.8.2
+# Device profiles in Hotspot Manager 0.8.3
 
 ## Existing controls retained
 
@@ -108,10 +108,10 @@ that a cap is being enforced. See TRAFFIC_STATUS.md.
 
 ## Features intentionally skipped
 
-| Requested feature | Status in 0.8.2 |
+| Requested feature | Status in 0.8.3 |
 |---|---|
 | Exact connection start time | Not reported by the native client/lease metadata used here. No lease-expiration subtraction or first-observation estimate is substituted. |
-| Historical unmonitored usage | Not available. Recorded IPv4 usage is now accumulated persistently per IP/MAC only from observed monitor counters. |
+| Historical unmonitored usage | Not available. Current-session and cumulative MAC IPv4 usage count only observed monitor counters. |
 | Internet-only / IPv6 throughput | The optional monitor reports IPv4 traffic including local traffic, not Internet-only or IPv6 throughput. |
 | IPv6 or aggregate multi-address cap | Not implemented. Software policing applies separately to each current IPv4/MAC binding. |
 | Per-device data quota | Not implemented. Recorded usage does not enforce a byte quota. |

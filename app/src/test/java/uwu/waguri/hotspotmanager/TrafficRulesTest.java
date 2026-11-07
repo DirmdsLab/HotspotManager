@@ -126,6 +126,37 @@ public final class TrafficRulesTest {
         assertFalse(TrafficRules.filter(client, "ingress", 50000, 0, COOKIE).contains("drop"));
     }
 
+    @Test public void downloadBurstFitsSeveralFullAggregatesWithoutInflatingTheRate() {
+        TrafficRules.Client client = new TrafficRules.Client("rndis0", "192.168.78.2", MAC);
+        String down = TrafficRules.filter(client, "egress", 50001, 5000, COOKIE);
+        assertTrue(down.contains("rate 5000kbit burst 312500 mtu 65535"));
+        assertEquals(500000, TrafficRules.burstBytes("egress", 8000));
+        assertEquals(65536, TrafficRules.burstBytes("ingress", 5000));
+        assertTrue(TrafficRules.burstBytes("egress", 5000) >= 4 * 65536);
+        assertEquals(31250000, TrafficRules.burstBytes("egress", 500000));
+        assertThrows(IllegalArgumentException.class, () -> TrafficRules.burstBytes("egress", 0));
+    }
+
+    @Test public void downloadBurstAdmitsAClusterButRetainsTheLongTermTokenBudget() {
+        int burst = TrafficRules.burstBytes("egress", 5000);
+        double tokens = burst;
+        long accepted = 0;
+        // Four 64 KiB skbs arriving together no longer cause immediate three-packet loss.
+        for (int i = 0; i < 4; i++) {
+            assertTrue(tokens >= 65536);
+            tokens -= 65536;
+            accepted += 65536;
+        }
+        for (int ms = 1; ms <= 60000; ms++) {
+            tokens = Math.min(burst, tokens + 625.0);
+            for (int packet = 0; packet < 10; packet++) {
+                if (tokens >= 1500) { tokens -= 1500; accepted += 1500; }
+            }
+        }
+        assertTrue(accepted <= 60L * 625000 + burst);
+        assertTrue(accepted >= 60L * 625000 - 1500);
+    }
+
     @Test public void untrustedClientsCannotGenerateShellCommands() {
         for (String ip : new String[] {"192.168.77.1", "192.168.77.255", "192.168.77.02", "192.168.78.2", "192.168.77.2;id"}) {
             assertThrows(IllegalArgumentException.class, () -> new TrafficRules.Client("ap0", ip, MAC));

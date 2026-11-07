@@ -45,6 +45,7 @@ public final class HotspotProbe extends XposedModule {
     private static final ConcurrentHashMap<String, ReservationSnapshot> RESERVATION_CACHE =
             new ConcurrentHashMap<>();
     private final UsbUpstreamRecovery usbRecovery = new UsbUpstreamRecovery();
+    private final TrafficSessionState trafficSessions = new TrafficSessionState();
 
     private static final class ReservationSnapshot {
         final String raw;
@@ -110,9 +111,49 @@ public final class HotspotProbe extends XposedModule {
             installGatewayHook(loader);
             installDnsHook(loader);
             installUsbUpstreamRecoveryHook(loader);
+            installTrafficSessionHooks(loader);
         } else if (STACK_PKG.equals(packageName)) {
             installDhcpHooks(loader);
         }
+    }
+
+    private void installTrafficSessionHooks(ClassLoader loader) {
+        try {
+            Class<?> tethering = Class.forName("com.android.networkstack.tethering.Tethering", false, loader);
+            Method update = tethering.getDeclaredMethod("updateConnectedClients", java.util.List.class, java.util.List.class);
+            update.setAccessible(true);
+            hook(update).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Object clients = chain.getArg(0);
+                    if (clients instanceof java.util.Collection<?>) {
+                        java.util.List<String> macs = new java.util.ArrayList<>();
+                        for (Object client : (java.util.Collection<?>) clients) {
+                            macs.add(String.valueOf(client.getClass().getMethod("getMacAddress").invoke(client)));
+                        }
+                        trafficSessions.wifiClients(macs);
+                        publishTrafficSessions();
+                    }
+                } catch (Throwable error) { Log.w(TAG, "WIFI_SESSION_UPDATE_FAILED", error); }
+                return result;
+            });
+            // Both callbacks and DHCP refreshes can call this private method from compiled code.
+            for (Class<?> caller : tethering.getDeclaredClasses()) {
+                if (!caller.getSimpleName().equals("TetheringSoftApCallback")) continue;
+                for (Method method : caller.getDeclaredMethods()) {
+                    if (method.getName().equals("onConnectedClientsChanged")) deoptimize(method);
+                }
+            }
+            Log.i(TAG, "TRAFFIC_SESSION_HOOK_INSTALLED");
+        } catch (Throwable error) { Log.w(TAG, "TRAFFIC_SESSION_HOOK_FAILED", error); }
+    }
+
+    private void publishTrafficSessions() {
+        try {
+            Context context = runtimeContext();
+            if (context == null) throw new IllegalStateException("Tethering context is unavailable.");
+            TrafficSessionSnapshot.publish(context, trafficSessions);
+        } catch (Throwable error) { Log.w(TAG, "TRAFFIC_SESSION_PUBLISH_FAILED", error); }
     }
 
     /**
@@ -157,6 +198,13 @@ public final class HotspotProbe extends XposedModule {
             hook(servingInactive).intercept(chain -> {
                 Object result = chain.proceed();
                 usbRecovery.stop(chain.getArg(0));
+                try {
+                    Object server = chain.getArg(0);
+                    if (USB.iface.equals(interfaceName.invoke(server))) {
+                        trafficSessions.usbStopped(server);
+                        publishTrafficSessions();
+                    }
+                } catch (Throwable error) { Log.w(TAG, "USB_SESSION_STOP_FAILED", error); }
                 return result;
             });
 
@@ -168,9 +216,13 @@ public final class HotspotProbe extends XposedModule {
                     if (!USB.iface.equals(interfaceName.invoke(ipServer))) return result;
                     if ((Integer) chain.getArg(0) != tetheredMode) {
                         usbRecovery.stop(ipServer);
+                        trafficSessions.usbStopped(ipServer);
+                        publishTrafficSessions();
                         return result;
                     }
 
+                    trafficSessions.usbStarted(ipServer);
+                    publishTrafficSessions();
                     Object stateMachine = chain.getThisObject();
                     Object tethering = outerField.get(stateMachine);
                     Object handlerValue = getHandler.invoke(stateMachine);
@@ -753,48 +805,52 @@ public final class HotspotProbe extends XposedModule {
         return snapshot.reservations;
     }
 
-    private static String readRuntimeConfig() {
-        try {
-            Context context = cachedContext;
-            if (context == null) {
-                Class<?> activityThread = Class.forName("android.app.ActivityThread");
+    private static Context runtimeContext() throws Exception {
+        Context context = cachedContext;
+        if (context == null) {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
 
-                Method currentApplication =
-                        activityThread.getDeclaredMethod("currentApplication");
-                currentApplication.setAccessible(true);
-                Object app = currentApplication.invoke(null);
+            Method currentApplication =
+                    activityThread.getDeclaredMethod("currentApplication");
+            currentApplication.setAccessible(true);
+            Object app = currentApplication.invoke(null);
 
-                if (app instanceof Context) {
-                    context = ((Context) app).getApplicationContext();
-                }
-
-                // Fallback for process startup ordering: use ActivityThread's
-                // system context if the Application object is not available yet.
-                if (context == null) {
-                    Method currentThread =
-                            activityThread.getDeclaredMethod("currentActivityThread");
-                    currentThread.setAccessible(true);
-                    Object thread = currentThread.invoke(null);
-                    if (thread != null) {
-                        Method getSystemContext =
-                                activityThread.getDeclaredMethod("getSystemContext");
-                        getSystemContext.setAccessible(true);
-                        Object systemContext = getSystemContext.invoke(thread);
-                        if (systemContext instanceof Context) {
-                            context = (Context) systemContext;
-                        }
-                    }
-                }
-
-                if (context != null) cachedContext = context;
+            if (app instanceof Context) {
+                context = ((Context) app).getApplicationContext();
             }
 
+            // Fallback for process startup ordering: use ActivityThread's
+            // system context if the Application object is not available yet.
+            if (context == null) {
+                Method currentThread =
+                        activityThread.getDeclaredMethod("currentActivityThread");
+                currentThread.setAccessible(true);
+                Object thread = currentThread.invoke(null);
+                if (thread != null) {
+                    Method getSystemContext =
+                            activityThread.getDeclaredMethod("getSystemContext");
+                    getSystemContext.setAccessible(true);
+                    Object systemContext = getSystemContext.invoke(thread);
+                    if (systemContext instanceof Context) {
+                        context = (Context) systemContext;
+                    }
+                }
+            }
+
+            if (context != null) cachedContext = context;
+        }
+
+        return context;
+    }
+
+    private static String readRuntimeConfig() {
+        try {
+            Context context = runtimeContext();
             if (context == null) {
                 Log.w(TAG, "RUNTIME_CONFIG_CONTEXT_UNAVAILABLE; using defaults");
                 return null;
             }
-            return Settings.Global.getString(
-                    context.getContentResolver(), CONFIG_KEY);
+            return Settings.Global.getString(context.getContentResolver(), CONFIG_KEY);
         } catch (Throwable t) {
             Log.w(TAG, "RUNTIME_CONFIG_READ_FAILED; using defaults", t);
             return null;

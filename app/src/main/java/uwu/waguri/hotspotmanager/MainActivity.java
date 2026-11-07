@@ -531,8 +531,9 @@ public final class MainActivity extends Activity {
                 : TrafficService.running ? "IPv4 rate unavailable: waiting for a fresh sample" : "IPv4 rate unavailable: monitoring stopped";
         TrafficStore trafficStore = new TrafficStore(this);
         try {
-            value += "\nRecorded IPv4 usage (this IP)  " + trafficStore.usage(client.iface + "|" + client.mac + "|" + client.ip).label();
-            value += "\nRecorded IPv4 usage (this MAC)  " + trafficStore.usage(client.mac).label();
+            TrafficUsage session = trafficStore.sessionUsage(client.iface, client.mac, TrafficSessionSnapshot.read(this));
+            value += "\nCurrent session IPv4 usage  " + (session == null ? "Unavailable: waiting for native connection events" : session.label());
+            value += "\nTotal this MAC IPv4 usage  " + trafficStore.usage(client.mac).label();
         } catch (Exception error) { value += "\nUsage unavailable: " + error.getMessage(); }
         int[] limits = trafficStore.limits(client.mac);
         if (limits[0] > 0 || limits[1] > 0) {
@@ -578,7 +579,7 @@ public final class MainActivity extends Activity {
         up.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         if (limits[1] > 0) up.setText(new java.math.BigDecimal(limits[1]).movePointLeft(3).stripTrailingZeros().toPlainString());
         box.addView(up);
-        box.addView(label("0.1–500 Mbps. A blank field means unlimited. A token-bucket policer allows short bursts; the average accepted rate approaches the configured limit. Policies are saved permanently by MAC.", 11, false, MUTED));
+        box.addView(label("0.1–500 Mbps. A blank field means unlimited. A token-bucket policer allows short bursts. Download uses a larger burst allowance to reduce TCP loss; sustained throughput depends on the connection. Policies are saved permanently by MAC.", 11, false, MUTED));
         Button save = actionButton("Save MAC rate policy", true);
         save.setEnabled(!busy && !controlBusy);
         save.setOnClickListener(v -> {
@@ -606,7 +607,7 @@ public final class MainActivity extends Activity {
             } catch (Exception error) { setStatus(error.getMessage()); }
         });
         box.addView(remove, new LinearLayout.LayoutParams(-1, dp(46)));
-        box.addView(label("Recorded usage counts accepted IPv4 bytes only while monitored, including local traffic and overhead. It survives app restarts and rate changes; it is not carrier billing or unmonitored history.", 11, false, MUTED));
+        box.addView(label("Current session usage resets on native disconnect/reconnect and includes this MAC on the selected interface. Total this MAC usage persists across sessions and interfaces. Both count accepted IPv4 bytes only while monitored, including local traffic and headers.", 11, false, MUTED));
         Button resetUsage = actionButton("Reset recorded usage for this MAC", false);
         resetUsage.setOnClickListener(v -> new AlertDialog.Builder(this)
                 .setTitle("Reset recorded IPv4 usage?")

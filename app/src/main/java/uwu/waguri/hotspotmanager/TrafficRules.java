@@ -63,7 +63,7 @@ final class TrafficRules {
         if (kbps != 0 && (kbps < 100 || kbps > 500000)) throw new IllegalArgumentException("Invalid rate.");
         boolean upload = "ingress".equals(direction);
         String selector = upload ? "src" : "dst";
-        int burst = kbps == 0 ? 1048576 : Math.max(65536, kbps * 1000 / 80);
+        int burst = kbps == 0 ? 1048576 : burstBytes(direction, kbps);
         String first = kbps == 0 ? "1000000kbit burst 1048576 conform-exceed pipe/pipe"
                 : kbps + "kbit burst " + burst + " mtu 65535 conform-exceed drop/pipe";
         // The second, non-dropping action counts only bytes accepted by the first action.
@@ -72,6 +72,16 @@ final class TrafficRules {
                 + "/32 match ether " + selector + " " + client.mac
                 + " action police rate " + first
                 + " action police rate 1000000kbit burst 1048576 conform-exceed continue/continue cookie " + cookie;
+    }
+
+    static int burstBytes(String direction, int kbps) {
+        validateDirection(direction, FIRST_PREF);
+        if (kbps < 100 || kbps > 500000) throw new IllegalArgumentException("Invalid rate.");
+        if ("ingress".equals(direction)) return Math.max(65536, kbps * 1000 / 80);
+        // A 64 KiB bucket holds barely one full GRO/GSO skb. Back-to-back skbs then
+        // cause clustered TCP loss. Allow four such skbs or 500 ms of tokens.
+        // This changes burst tolerance, never the configured long-term bit rate.
+        return (int) Math.max(4L * 65536, (kbps * 1000L + 15) / 16);
     }
 
     static String show(String iface, String direction, int pref) {

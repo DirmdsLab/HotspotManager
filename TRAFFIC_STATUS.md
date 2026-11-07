@@ -1,4 +1,4 @@
-# IPv4 speed and rate control in 0.8.2
+# IPv4 speed and rate control in 0.8.3
 
 ## What the diagnostic established
 
@@ -67,7 +67,10 @@ require opening the app and starting it again.
 - Mbps uses decimal units: delta bytes * 8 / elapsed seconds / 1,000,000.
   The interval is actual monotonic elapsed time, usually at least two seconds.
 - Caps accept 0.1–500 Mbps with up to three decimal places. Blank means unlimited.
-  The token bucket permits short bursts (at least 64 KiB for large packets).
+  Upload retains its original 100 ms / 64 KiB minimum bucket. Download now
+  permits a 500 ms / 256 KiB minimum bucket to accommodate several large GRO/GSO
+  skbs without immediate clustered loss. The rate is never multiplied. The minimum
+  bucket can represent a longer burst at low configured rates.
   Sustained accepted throughput approaches the cap; short intervals can exceed
   it. Policing drops excess packets rather than queueing them, so TCP throughput
   can fall below the configured value.
@@ -86,26 +89,49 @@ multi-address limits, and individual native USB blocking remain unimplemented.
 
 ## Recorded data usage
 
-The device card and details show recorded Down/Up usage for the selected IPv4/MAC
-binding and a total for the MAC across its addresses/interfaces. Binary units
-are explicit (KiB/MiB/GiB). Totals persist in private app preferences across
-monitor restarts, same-key updates, reconnects, and rate-policy changes.
+The device card and details show **Current session IPv4 usage**, followed by
+**Total this MAC IPv4 usage**. Both show Down/Up with explicit binary units
+(KiB/MiB/GiB). The total preserves the existing `usage_<MAC>` value from 0.8.2;
+old per-IP history is no longer presented or incremented as session usage.
 
-Each accepted-byte counter has a saved cursor. Its delta and both usage totals
-are committed together; reading the same counter twice or restarting the process
-does not count the same bytes again. Old rules are sampled before policy changes
-and again before verified cleanup. Initial owned counters start at zero; a reset
-counter contributes its new observed bytes. Missing counters are not estimated.
+The Vector tethering hook observes the native Wi-Fi connected-client list and
+USB serving-state transitions. A UUID generation changes on disconnect/reconnect,
+including a reconnect to the same IP between two monitor polls. The scoped native
+process sends a small boot-scoped snapshot to an explicit app receiver protected
+by Android's `TETHER_PRIVILEGED` sender permission. Snapshots are persisted in app
+preferences; no new global setting or permission grant is required. Older,
+out-of-order snapshots and snapshots from a previous boot are rejected.
 
-Reset recorded usage for this MAC clears only its usage and establishes a fresh
-baseline at the next sample. Full device Reset also clears usage. Speed policies,
-other MACs, and DHCP reservations are retained by the usage-only reset.
+A session is per interface and MAC, aggregating its current managed IPv4 addresses.
+IP changes, rate-policy changes and monitoring restarts keep the same generation.
+Wi-Fi and USB sessions are independent; the lifetime MAC total includes both.
+A randomized/different MAC is a different identity. If native event hooks are
+unavailable, session usage is marked unavailable and normal lifetime accounting
+continues. ARP `STALE`, `DELAY` or `FAILED` states are not treated as reliable
+Wi-Fi disconnection events. Missing interface/counters still cannot be recovered.
 
-These are observed accepted IPv4 bytes, including local traffic and headers,
-not carrier billing. Traffic while monitoring is off, IPv6, and data lost when an
-interface/kernel counter vanishes between samples cannot be reconstructed. A
-hard process kill may miss a short interval; surviving owned counters can be
-reconciled on the next start. There is no data-quota enforcement.
+The monitor rotates old filters when the native generation changes. Old filter
+counters are reconciled into the lifetime MAC total only after that transition;
+they never leak into the new session. A new session begins recording with its
+fresh filters. Since monitoring polls roughly every two seconds plus helper
+latency, bytes crossing the reconnect boundary before fresh filters are installed
+cannot be assigned exactly to either session and are excluded from the new
+session. A hard reboot can also lose an unsampled interval. No usage is estimated.
+
+Accepted-byte cursors, lifetime totals and matching session totals are committed
+together to prevent double counting after process recreation. Legacy filters
+without a native session token contribute only to lifetime usage during cleanup.
+Reset recorded usage for this MAC clears the MAC's lifetime and session counters,
+keeping its native connection generation and rebasing active rule cursors on the
+next sample. Full device Reset also clears usage. Other MACs are retained.
+
+Update in place, reboot, open the app and reconnect clients to initialize the new
+native event stream. A tethering-process restart starts fresh generations because
+its previous physical connection history is unavailable. No accounting continues
+while the monitor is off, though native connection transitions are still observed
+when the app can receive broadcasts. A force-stopped app may miss events until it
+is opened again. These are accepted IPv4 bytes including local traffic and headers,
+not carrier billing, historical unmonitored data or IPv6. There is no byte quota.
 
 ## Ownership and recovery
 
@@ -156,11 +182,13 @@ On the phone, verify the following before depending on a cap:
 1. Prepare and reboot. Confirm native dump state before starting monitoring.
 2. Transfer IPv4 data for two different clients at different rates. Check each
    address's independent Down/Up values against endpoint transfer measurements.
-3. Apply 1 Mbps to one MAC only. Measure sustained download and upload for at
-   least 30 seconds; the other client should retain its own rate/policy.
+3. Apply 5 Mbps to one MAC only, then repeat at 8 Mbps. Measure sustained
+   IPv4 download and upload for at least 60 seconds after warm-up; the other client should retain its own rate/policy.
 4. Test USB-only first, hotspot-only, both interfaces, upstream changes, off/on,
    same-MAC reconnect, changed IP, and a different MAC reusing the previous IP.
-5. Test saved policy updates/removal, reset, process recreation, reboot resume,
+5. Confirm session usage resets on same-MAC/IP reconnect while its lifetime total
+   keeps increasing. Confirm IP/policy changes and monitor restarts retain the
+   session. Test saved policy updates/removal, reset, process recreation, reboot resume,
    Stop, and Restore. Confirm original native filters/root qdiscs are preserved.
 6. Confirm IPv6 remains outside the measurement/cap. Do not treat the result as
    an all-protocol Internet cap.
@@ -208,3 +236,8 @@ included in this source package and is never collected automatically.
   https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/android16-release/Tethering/src/android/net/ip/IpServer.java
 - Native forwarding requester idempotence:
   https://android.googlesource.com/platform/system/netd/+/master/server/TetherController.cpp
+
+- Linux policer skb byte-token accounting:
+  https://android.googlesource.com/kernel/common/+/refs/heads/android12-5.10/net/sched/act_police.c
+- Android native association-event integration:
+  https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/android16-release/Tethering/src/com/android/networkstack/tethering/Tethering.java
