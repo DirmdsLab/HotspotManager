@@ -1,4 +1,4 @@
-# Device profiles in Hotspot Manager 0.7.0
+# Device profiles in Hotspot Manager 0.7.1
 
 ## Existing controls retained
 
@@ -22,6 +22,16 @@ switches, and ADB tethering commands retain their existing behavior.
 | Wi-Fi block | Available only when the native Soft AP capability reports client force-disconnect support, or when an existing block needs removal. |
 | Saved device profiles | Added below the existing Manual & Saved content, so a blocked/disconnected MAC can still be opened and reset. |
 | Reset | Removes the chosen MAC's profile and any native Wi-Fi block; releases only its selected-interface DHCP reservation. |
+
+## Blocked-device list in 0.7.1
+
+Blocked devices appears below Detected devices and reads Android's saved Wi-Fi
+blocklist directly. It includes entries from Android Settings even without an
+app profile or a current neighbor record. Unblock on this list keeps the profile
+and IP reservation. Refresh reloads native state; failed reads are shown as an
+error/last-known snapshot, not as an empty blocklist.
+
+See TRAFFIC_STATUS.md for why per-IP speed/limiting still require device verification.
 
 ## MAC identity and persistence
 

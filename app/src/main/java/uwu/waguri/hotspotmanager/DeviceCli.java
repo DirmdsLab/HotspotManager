@@ -29,21 +29,27 @@ public final class DeviceCli {
         int code = 0;
         try {
             if (Process.myUid() != 0) throw new SecurityException("Root access is required.");
-            if (args.length != 2 || !("inspect".equals(args[0])
-                    || "block".equals(args[0]) || "unblock".equals(args[0]))) {
-                throw new IllegalArgumentException("Usage: inspect|block|unblock MAC");
+            boolean listOnly = args.length == 1 && "blocked".equals(args[0]);
+            if (!listOnly && (args.length != 2 || !("inspect".equals(args[0])
+                    || "block".equals(args[0]) || "unblock".equals(args[0])))) {
+                throw new IllegalArgumentException("Usage: blocked | inspect|block|unblock MAC");
             }
-            String mac = DeviceProfile.normalizeMac(args[1]);
             Context context = TetheringCli.systemContext();
-            result.put("mac", mac);
-            if ("inspect".equals(args[0])) {
-                try { result.put("client", readClient(context, mac)); }
-                catch (Exception error) { result.put("clientError", message(error)); }
-                try { result.put("wifi", inspectWifi(context, mac)); }
-                catch (Exception error) { result.put("wifiError", message(error)); }
+            if (listOnly) {
+                result.put("blockedMacs", readBlocked(context));
             } else {
-                changeBlock(context, mac, "block".equals(args[0]));
-                result.put("blocked", "block".equals(args[0]));
+                String mac = DeviceProfile.normalizeMac(args[1]);
+                result.put("mac", mac);
+                if ("inspect".equals(args[0])) {
+                    try { result.put("client", readClient(context, mac)); }
+                    catch (Exception error) { result.put("clientError", message(error)); }
+                    try { result.put("wifi", inspectWifi(context, mac)); }
+                    catch (Exception error) { result.put("wifiError", message(error)); }
+                } else {
+                    changeBlock(context, mac, "block".equals(args[0]));
+                    result.put("blocked", "block".equals(args[0]));
+                    result.put("blockedMacs", readBlocked(context));
+                }
             }
             result.put("ok", true);
         } catch (Throwable error) {
@@ -115,8 +121,16 @@ public final class DeviceCli {
         if (config == null) throw new IllegalStateException("Saved hotspot configuration is unavailable.");
         JSONObject result = new JSONObject();
         result.put("blocked", blockedMacs(config).contains(mac));
+        result.put("blockedMacs", new JSONArray(blockedMacs(config)));
         result.put("blockSupported", supportsBlocking(wifi));
         return result;
+    }
+
+    private static JSONArray readBlocked(Context context) throws Exception {
+        Object wifi = wifiManager(context);
+        Object config = wifi.getClass().getMethod("getSoftApConfiguration").invoke(wifi);
+        if (config == null) throw new IllegalStateException("Saved hotspot configuration is unavailable.");
+        return new JSONArray(blockedMacs(config));
     }
 
     private static void changeBlock(Context context, String mac, boolean blocked) throws Exception {

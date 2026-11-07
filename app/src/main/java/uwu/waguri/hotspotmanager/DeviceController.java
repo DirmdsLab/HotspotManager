@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,6 +36,15 @@ final class DeviceController {
             main.post(() -> callback.accept(new Reply(null, e.getMessage())));
             return;
         }
+        submit(context, action, target, callback);
+    }
+
+    static void loadBlocked(Context context, Consumer<Reply> callback) {
+        submit(context, "blocked", null, callback);
+    }
+
+    private static void submit(Context context, String action, String target, Consumer<Reply> callback) {
+        Handler main = new Handler(Looper.getMainLooper());
         if (!RUNNING.compareAndSet(false, true)) {
             main.post(() -> callback.accept(new Reply(null, "Another device operation is in progress.")));
             return;
@@ -45,7 +55,8 @@ final class DeviceController {
             try {
                 RootShell.Result result = RootShell.run("CLASSPATH=" + RootShell.quote(apk)
                         + " /system/bin/app_process /system/bin " + DeviceCli.class.getName()
-                        + " " + RootShell.quote(action) + " " + RootShell.quote(target));
+                        + " " + RootShell.quote(action)
+                        + (target == null ? "" : " " + RootShell.quote(target)));
                 reply = parse(result, target);
             } catch (Exception e) {
                 reply = new Reply(null, e.getClass().getSimpleName() + ": " + e.getMessage());
@@ -66,8 +77,12 @@ final class DeviceController {
             if (!value.optBoolean("ok", false)) {
                 return new Reply(null, value.optString("error", "The device operation failed."));
             }
-            if (result.exitCode != 0 || !mac.equals(value.optString("mac"))) {
+            if (result.exitCode != 0 || (mac != null && !mac.equals(value.optString("mac")))) {
                 return new Reply(null, "The root helper returned a mismatched device result.");
+            }
+            if (mac == null) {
+                JSONArray blocked = value.getJSONArray("blockedMacs");
+                for (int j = 0; j < blocked.length(); j++) DeviceProfile.normalizeMac(blocked.getString(j));
             }
             return new Reply(value, null);
         }

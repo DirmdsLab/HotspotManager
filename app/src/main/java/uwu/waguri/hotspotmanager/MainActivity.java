@@ -102,6 +102,9 @@ public final class MainActivity extends Activity {
     private boolean deviceLoading;
     private DeviceProfile.Type draftType = DeviceProfile.Type.UNKNOWN;
     private boolean draftRemember;
+    private final BlockedDeviceState blockedDevices = new BlockedDeviceState();
+    private boolean blockedDevicesLoading;
+    private LinearLayout blockedDevicesContainer;
 
     private static final class Reservation {
         final String iface;
@@ -391,6 +394,7 @@ public final class MainActivity extends Activity {
                 tetherRefreshPending = false;
                 scheduleTetheringRefresh();
             }
+            refreshBlockedDevices();
         });
     }
 
@@ -413,6 +417,7 @@ public final class MainActivity extends Activity {
                 ? shape(ACCENT, ACCENT, 14) : shape(SURFACE, SURFACE, 14));
         manualTab.setTextColor(tab == 1 ? ACCENT_TEXT : MUTED);
         renderPage();
+        if (tab == 0 && selectedClient == null) refreshBlockedDevices();
     }
 
     private void renderPage() {
@@ -451,6 +456,103 @@ public final class MainActivity extends Activity {
         } else {
             for (Client client : new ArrayList<>(clients)) renderClientCard(client);
         }
+        blockedDevicesContainer = column();
+        page.addView(blockedDevicesContainer);
+        renderBlockedDevices();
+    }
+
+    private void acceptBlockedDevices(JSONObject data) {
+        if (data == null || !data.has("blockedMacs")) return;
+        try {
+            JSONArray values = data.getJSONArray("blockedMacs");
+            List<String> macs = new ArrayList<>();
+            for (int i = 0; i < values.length(); i++) macs.add(values.getString(i));
+            blockedDevices.update(macs);
+        } catch (Exception error) {
+            blockedDevices.failed("Invalid native blocklist: " + error.getMessage());
+        }
+    }
+
+    private void refreshBlockedDevices() {
+        if (!resumed || isDestroyed() || activeTab != 0 || selectedClient != null
+                || busy || controlBusy || blockedDevicesLoading) return;
+        busy = true;
+        blockedDevicesLoading = true;
+        renderBlockedDevices();
+        DeviceController.loadBlocked(this, reply -> {
+            busy = false;
+            blockedDevicesLoading = false;
+            if (isDestroyed() || isFinishing()) return;
+            if (reply.ok()) acceptBlockedDevices(reply.data);
+            else blockedDevices.failed(reply.error);
+            renderBlockedDevices();
+        });
+    }
+
+    private void renderBlockedDevices() {
+        if (blockedDevicesContainer == null || activeTab != 0 || selectedClient != null) return;
+        blockedDevicesContainer.removeAllViews();
+        LinearLayout title = row();
+        title.addView(label("Blocked devices", 19, true, TEXT),
+                new LinearLayout.LayoutParams(0, -2, 1f));
+        Button refresh = actionButton("Refresh", false);
+        refresh.setEnabled(!busy && !controlBusy && !blockedDevicesLoading);
+        refresh.setOnClickListener(v -> refreshBlockedDevices());
+        title.addView(refresh);
+        blockedDevicesContainer.addView(title);
+        blockedDevicesContainer.addView(label("Android's saved Wi-Fi MAC blocklist, including disconnected devices.", 12, false, MUTED));
+        if (blockedDevicesLoading) {
+            blockedDevicesContainer.addView(label("Reading blocked devices...", 12, false, MUTED));
+        }
+        if (blockedDevices.error() != null) {
+            blockedDevicesContainer.addView(label(blockedDevices.error(), 12, false, RED));
+            if (blockedDevices.known()) blockedDevicesContainer.addView(
+                    label("Showing the last successful blocklist snapshot.", 11, false, MUTED));
+        }
+        if (!blockedDevices.known()) {
+            if (!blockedDevicesLoading) blockedDevicesContainer.addView(
+                    label("Blocked-device status is unavailable. Tap Refresh to retry.", 12, false, MUTED));
+            return;
+        }
+        if (blockedDevices.macs().isEmpty()) {
+            if (blockedDevices.error() == null && !blockedDevicesLoading) {
+                blockedDevicesContainer.addView(label("No Wi-Fi devices are blocked.", 12, false, MUTED));
+            }
+            return;
+        }
+        for (String mac : blockedDevices.macs()) {
+            LinearLayout box = card();
+            box.addView(label(mac, 15, true, ACCENT));
+            DeviceProfile profile = deviceProfiles.get(mac);
+            box.addView(label("Device type  ·  " + (profile == null
+                    ? DeviceProfile.Type.UNKNOWN.label : profile.type.label), 12, false, MUTED));
+            if (profile != null && !profile.ip.isEmpty()) {
+                box.addView(label("Last saved IP  ·  " + profile.ip, 12, false, MUTED));
+            }
+            Button unblock = actionButton("Unblock", true);
+            unblock.setEnabled(!busy && !controlBusy && !blockedDevicesLoading);
+            unblock.setOnClickListener(v -> unblockListedDevice(mac));
+            box.addView(unblock, new LinearLayout.LayoutParams(-1, dp(46)));
+            addPageCard(blockedDevicesContainer, box);
+        }
+    }
+
+    private void unblockListedDevice(String mac) {
+        if (isOperationInProgress() || controlBusy) return;
+        busy = true;
+        renderBlockedDevices();
+        DeviceController.execute(this, "unblock", mac, reply -> {
+            busy = false;
+            if (isDestroyed() || isFinishing()) return;
+            if (reply.ok()) {
+                acceptBlockedDevices(reply.data);
+                setStatus("Native Wi-Fi block removed for " + mac + ". Device profile and IP reservation are kept.");
+            } else {
+                blockedDevices.failed(reply.error);
+                setStatus(reply.error);
+            }
+            renderBlockedDevices();
+        });
     }
 
     private void renderClientCard(Client client) {
@@ -546,6 +648,10 @@ public final class MainActivity extends Activity {
             deviceMetadata = reply.data;
             deviceMetadataError = reply.error;
             deviceMetadataTime = System.currentTimeMillis();
+            if (reply.data != null) {
+                JSONObject wifi = reply.data.optJSONObject("wifi");
+                if (wifi != null) acceptBlockedDevices(wifi);
+            }
             renderPage();
         });
     }
@@ -554,7 +660,11 @@ public final class MainActivity extends Activity {
         Client client = currentSelectedClient();
         LinearLayout navigation = row();
         Button back = actionButton("Back to devices", false);
-        back.setOnClickListener(v -> { selectedClient = null; renderPage(); });
+        back.setOnClickListener(v -> {
+            selectedClient = null;
+            renderPage();
+            refreshBlockedDevices();
+        });
         navigation.addView(back, new LinearLayout.LayoutParams(0, dp(46), 1f));
         Button refresh = actionButton("Refresh details", false);
         refresh.setEnabled(!busy && !controlBusy);
@@ -704,6 +814,7 @@ public final class MainActivity extends Activity {
             busy = false;
             if (isDestroyed() || isFinishing()) return;
             if (!reply.ok()) { setStatus(reply.error); if (isSelectedDevice(client.mac)) renderPage(); return; }
+            acceptBlockedDevices(reply.data);
             try {
                 deviceProfiles.save(new DeviceProfile(client.mac, requestedType, client.iface, client.ip, remember));
                 updateBlockMetadata(blocked);
@@ -741,6 +852,7 @@ public final class MainActivity extends Activity {
             busy = false;
             if (isDestroyed() || isFinishing()) return;
             if (!reply.ok()) { setStatus("Reset stopped: " + reply.error); renderPage(); return; }
+            acceptBlockedDevices(reply.data);
             try { updateBlockMetadata(false); } catch (Exception ignored) { }
             finishDeviceReset(client);
         });
@@ -1028,6 +1140,7 @@ public final class MainActivity extends Activity {
                 setStatus("Ready  ·  " + clients.size() + " devices  ·  "
                         + reservations.size() + " reservations");
                 renderPage();
+                refreshBlockedDevices();
             });
         }).start();
     }

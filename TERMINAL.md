@@ -8,7 +8,7 @@ hooks remain enabled.
 
 ## First setup
 
-1. Sign and install the 0.7.0 APK using the same signing key as the installed app.
+1. Sign and install the 0.7.1 APK using the same signing key as the installed app.
 2. Open Hotspot Manager and grant its root request in Magisk.
 3. Keep the existing Vector scopes enabled and reboot after updating the module.
 4. Connect a USB data cable when testing USB tethering.
