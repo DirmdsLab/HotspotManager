@@ -49,7 +49,29 @@ After installing Vector:
 | Stock ROM Base | Android 14 |
 | GSI ROM | Android 16 |
 
+## Features
 
+- **Static IP Configuration**
+  - Assigns a static IP address to USB tethering: `192.168.78.1`.
+  - Assigns a static IP address to Wi-Fi hotspot: `192.168.77.1`.
+  - Useful for turning an Android phone or tablet into a server.
+
+- **Connected Device Monitoring**
+  - Displays all devices connected through Wi-Fi hotspot and USB tethering.
+  - Identifies connected devices based on their IP addresses.
+  - Allows individual static IP assignments based on each device's MAC address.
+
+- **Per-Device Internet Speed Limit**
+  - Set individual internet speed limits for each connected device based on its IP address.
+
+- **Real-Time Network Monitoring**
+  - Monitors real-time internet speed for each connected device.
+  - Displays individual network activity based on IP addresses.
+
+- **Device Blocking**
+  - Block individual devices from accessing the network.
+
+And other :v 
 
 ## Build Instructions
 
