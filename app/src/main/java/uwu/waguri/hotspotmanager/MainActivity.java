@@ -529,7 +529,12 @@ public final class MainActivity extends Activity {
                 && SystemClock.elapsedRealtime() - TrafficService.sampleTime <= 15000L;
         String value = fresh && rate != null ? TrafficRules.displayRate(rate.down, rate.up)
                 : TrafficService.running ? "IPv4 rate unavailable: waiting for a fresh sample" : "IPv4 rate unavailable: monitoring stopped";
-        int[] limits = new TrafficStore(this).limits(client.mac);
+        TrafficStore trafficStore = new TrafficStore(this);
+        try {
+            value += "\nRecorded IPv4 usage (this IP)  " + trafficStore.usage(client.iface + "|" + client.mac + "|" + client.ip).label();
+            value += "\nRecorded IPv4 usage (this MAC)  " + trafficStore.usage(client.mac).label();
+        } catch (Exception error) { value += "\nUsage unavailable: " + error.getMessage(); }
+        int[] limits = trafficStore.limits(client.mac);
         if (limits[0] > 0 || limits[1] > 0) {
             boolean active = fresh && rate != null && rate.downLimit == limits[0] && rate.upLimit == limits[1];
             value += "\nLimit  Down " + limitLabel(limits[0]) + " / Up " + limitLabel(limits[1])
@@ -548,7 +553,8 @@ public final class MainActivity extends Activity {
         if (trafficStatusView == null) return;
         TrafficStore store = new TrafficStore(this);
         trafficStatusView.setText(getString(R.string.traffic_mode_status,
-                store.prepared() ? "Software mode prepared" : "Native mode", TrafficService.status));
+                store.prepared() ? "Software mode prepared" : "Native mode", TrafficService.status
+                        + (TrafficService.usageWarning.isEmpty() ? "" : "\n" + TrafficService.usageWarning)));
         boolean available = !trafficBusy;
         trafficPrepareButton.setEnabled(available && !store.prepared() && !TrafficService.running);
         trafficStartButton.setEnabled(available && store.prepared() && !TrafficService.running);
@@ -600,6 +606,20 @@ public final class MainActivity extends Activity {
             } catch (Exception error) { setStatus(error.getMessage()); }
         });
         box.addView(remove, new LinearLayout.LayoutParams(-1, dp(46)));
+        box.addView(label("Recorded usage counts accepted IPv4 bytes only while monitored, including local traffic and overhead. It survives app restarts and rate changes; it is not carrier billing or unmonitored history.", 11, false, MUTED));
+        Button resetUsage = actionButton("Reset recorded usage for this MAC", false);
+        resetUsage.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Reset recorded IPv4 usage?")
+                .setMessage("Clear recorded totals for " + client.mac + " and its IP records. Monitoring, rate limits and other MACs are kept. A running monitor establishes a fresh baseline on its next sample.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Reset usage", (dialog, which) -> {
+                    try {
+                        new TrafficStore(this).resetUsage(client.mac);
+                        setStatus("Recorded usage cleared for this MAC. A fresh baseline is taken on the next monitor sample.");
+                        updateTrafficViews();
+                    } catch (Exception error) { setStatus(error.getMessage()); }
+                }).show());
+        box.addView(resetUsage, new LinearLayout.LayoutParams(-1, dp(46)));
         addPageCard(page, box);
     }
 
@@ -938,7 +958,6 @@ public final class MainActivity extends Activity {
         } else {
             access.addView(label("Individual USB client blocking is not available in this release.", 12, false, MUTED));
         }
-        detailRow(access, "Per-device data usage", "Unavailable");
         detailRow(access, "Data quota", "Not implemented");
         addPageCard(page, access);
 
@@ -1040,7 +1059,10 @@ public final class MainActivity extends Activity {
     }
 
     private void finishDeviceReset(Client client) {
-        try { new TrafficStore(this).limits(client.mac, 0, 0); }
+        try {
+            new TrafficStore(this).limits(client.mac, 0, 0);
+            new TrafficStore(this).resetUsage(client.mac);
+        }
         catch (Exception error) { setStatus("Reset stopped: " + error.getMessage()); renderPage(); return; }
         removeReservation(client.iface, client.mac);
         saveReservations("Selected device defaults restored. Renew DHCP to release the old address.", () -> {

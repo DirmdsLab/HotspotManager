@@ -39,5 +39,47 @@ final class TrafficStore {
         if (value == null) editor.remove(key); else editor.putString(key, value);
         if (!editor.commit()) throw new IllegalStateException("Could not persist traffic rule ownership.");
     }
+
+    TrafficUsage usage(String identity) {
+        try {
+            JSONObject value = new JSONObject(prefs.getString("usage_" + identity, "{}"));
+            return new TrafficUsage(value.optLong("down"), value.optLong("up"));
+        } catch (Exception error) { throw new IllegalStateException("Saved usage is invalid.", error); }
+    }
+
+    void account(String key, long bytes) throws Exception {
+        synchronized (TrafficStore.class) {
+            JSONObject record = new JSONObject(prefs.getString(key, "{}"));
+            long before = record.optLong("accounted", 0L);
+            if (before == bytes) return;
+            String mac = DeviceProfile.normalizeMac(record.getString("mac"));
+            TrafficRules.Client client = new TrafficRules.Client(record.getString("iface"), record.getString("ip"), mac);
+            boolean upload = record.getString("direction").equals("ingress");
+            long delta = TrafficUsage.delta(before, bytes);
+            SharedPreferences.Editor editor = prefs.edit().putString(key, record.put("accounted", bytes).toString());
+            for (String identity : new String[] {mac, client.key()}) {
+                TrafficUsage next = usage(identity).add(upload, delta);
+                editor.putString("usage_" + identity, new JSONObject().put("down", next.down).put("up", next.up).toString());
+            }
+            // Totals and their kernel cursor are committed together to avoid double counting on restart.
+            if (!editor.commit()) throw new IllegalStateException("Could not checkpoint traffic usage.");
+        }
+    }
+
+    void resetUsage(String mac) throws Exception {
+        mac = DeviceProfile.normalizeMac(mac);
+        synchronized (TrafficStore.class) {
+            SharedPreferences.Editor editor = prefs.edit().remove("usage_" + mac);
+            for (String key : prefs.getAll().keySet()) {
+                if (key.startsWith("usage_") && key.contains("|" + mac + "|")) editor.remove(key);
+            }
+            for (Map.Entry<String, String> entry : owned().entrySet()) {
+                if (entry.getKey().startsWith("owned_qdisc_")) continue;
+                JSONObject record = new JSONObject(entry.getValue());
+                if (mac.equals(record.optString("mac"))) editor.putString(entry.getKey(), record.put("accounted", -1L).toString());
+            }
+            if (!editor.commit()) throw new IllegalStateException("Could not reset recorded usage.");
+        }
+    }
     private TrafficStore() { throw new AssertionError(); }
 }

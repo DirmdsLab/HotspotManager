@@ -21,6 +21,7 @@ public final class TrafficService extends Service {
     static final String CHANNEL = "traffic_control";
     static volatile boolean running;
     static volatile String status = "Monitoring stopped";
+    static volatile String usageWarning = "";
     static volatile long sampleTime;
     static volatile Map<String, TrafficEngine.Rate> rates = Collections.emptyMap();
     private volatile boolean stopping;
@@ -93,6 +94,7 @@ public final class TrafficService extends Service {
         } catch (Exception error) {
             failed = true;
             status = "Traffic control stopped: " + error.getMessage();
+            android.util.Log.e("WaguriTraffic", status, error);
             new TrafficStore(this).wanted(false);
         } finally {
             rates = Collections.emptyMap(); sampleTime = 0L;
@@ -104,7 +106,8 @@ public final class TrafficService extends Service {
                     status = "Original offload settings restored. Reboot to reload native acceleration.";
                 } else if (!failed) status = "Monitoring stopped; owned filters removed. Saved limits are inactive.";
             } catch (Exception error) {
-                status = "Cleanup/restoration incomplete: " + error.getMessage();
+                status += "\nCleanup/restoration incomplete: " + error.getMessage();
+                android.util.Log.e("WaguriTraffic", status, error);
             }
             running = false;
             stopForeground(STOP_FOREGROUND_REMOVE);

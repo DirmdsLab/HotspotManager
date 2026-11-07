@@ -1,9 +1,34 @@
-# Hotspot Manager 0.8.0
+# Hotspot Manager 0.8.1
 
 A Vector module and root-assisted Android app for fixed Wi-Fi/USB tethering IPv4
 networks and live DHCP reservations. Intended device: Infinix with MediaTek
 Helio G99, Magisk root, and Vector. Runtime hooks target the Android 16
 Tethering and NetworkStack class layout used by this project.
+
+## Version 0.8.1 monitoring repair and usage
+
+- Read full action cookies and 64-bit accepted-byte counters directly from kernel
+  routing netlink, avoiding firmware-specific tc display formats.
+- Reconcile saved 0.8.0 ownership metadata using kernel cookies, while keeping
+  foreign/shared filters protected. A reboot clears stale transient filters.
+- Preserve the original monitoring failure when cleanup also fails; add the
+  WaguriTraffic log tag for monitoring/ownership diagnostics.
+- Add persistent recorded IPv4 usage per current IP/MAC binding and total per MAC.
+  Atomically checkpoint byte totals with their counter cursors to avoid counting
+  the same bytes again after process recreation.
+- Keep usage across rate-policy changes and reconnects; reset usage for one MAC
+  without changing its speed limits or other devices.
+- Check downstream interface identity before traffic-control mutations.
+
+Update in place with the same signing key, reboot Android, enable tethering,
+and start monitoring. Existing Software QoS preparation and rate policies are
+retained; prepare/reboot first if software mode has not been prepared. Do not
+uninstall or clear app data to recover from the old cookie message.
+
+Recorded usage covers accepted IPv4 bytes actually observed by the monitor,
+including local traffic and headers. It does not reconstruct traffic outside
+monitoring, data from before installation, IPv6, or carrier billing. Kernel
+counter loss before a checkpoint can leave a short unmeasured interval.
 
 ## Version 0.8.0 optional Software QoS
 
@@ -49,7 +74,7 @@ See [TRAFFIC_STATUS.md](TRAFFIC_STATUS.md) for operation and validation.
 - Tap a device/IP to open native metadata and settings scoped to that MAC.
 - Save permanent device-type profiles, reopen saved/disconnected MACs, or reset one device.
 - Native Wi-Fi MAC blocking is capability-gated and persists in Android's own blocklist.
-- Exact connection time, cumulative usage/quota, and native USB blocking remain unavailable.
+- Exact connection time, historical unmonitored usage, quotas, and native USB blocking remain unavailable.
   Version 0.8.0 adds optional IPv4 speed monitoring and rate policies.
 
 See [DEVICE_PROFILES.md](DEVICE_PROFILES.md) for supported fields, persistence,
@@ -156,7 +181,7 @@ pool. A client must renew DHCP or reconnect after its reservation changes.
 ## Included release artifact
 
 The fixed source distribution includes
-`artifacts/HotspotManager-0.8.0-unsigned.apk`. Sign it before installation using
+`artifacts/HotspotManager-0.8.1-unsigned.apk`. Sign it before installation using
 the instructions below. `VALIDATION.md` records the completed checks and their
 limits; `artifacts/SHA256SUMS` contains the pre-signing APK digest.
 

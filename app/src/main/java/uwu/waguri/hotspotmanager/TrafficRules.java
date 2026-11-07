@@ -105,7 +105,7 @@ final class TrafficRules {
     }
 
     static boolean ownsPreference(String text, String cookie) {
-        if (!hasCookie(text, cookie)) return false;
+        if (!hasCookie(text, cookie) || text.contains(" foreign handle ")) return false;
         Matcher leaves = Pattern.compile("\\bfh\\s+[0-9a-f]{1,3}::[0-9a-f]{1,3}\\b").matcher(text);
         int count = 0;
         while (leaves.find()) count++;

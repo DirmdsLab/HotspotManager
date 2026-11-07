@@ -1,4 +1,4 @@
-# Device profiles in Hotspot Manager 0.8.0
+# Device profiles in Hotspot Manager 0.8.1
 
 ## Existing controls retained
 
@@ -21,7 +21,7 @@ switches, and ADB tethering commands retain their existing behavior.
 | Temporary type | With Remember settings unchecked, the type lasts only for the app process. |
 | Wi-Fi block | Available only when the native Soft AP capability reports client force-disconnect support, or when an existing block needs removal. |
 | Saved device profiles | Added below the existing Manual & Saved content, so a blocked/disconnected MAC can still be opened and reset. |
-| Reset | Removes the chosen MAC's profile, rate policy and native Wi-Fi block; releases only its selected-interface DHCP reservation. |
+| Reset | Removes the chosen MAC's profile, recorded usage, rate policy and native Wi-Fi block; releases only its selected-interface DHCP reservation. |
 
 ## Blocked-device list in 0.7.1
 
@@ -87,7 +87,7 @@ USB per-device blocking is skipped. A Wi-Fi block does not block USB traffic.
 
 Reset asks for confirmation naming the selected MAC and interface. It first
 removes any native Wi-Fi block and rate policy for that MAC, then writes the reservation update,
-and removes the local profile after that write succeeds. Other MACs and
+and removes the local profile after that write succeeds. Recorded usage is also cleared for that MAC. Other MACs and
 reservations for the other interface are retained. A client must renew DHCP or
 reconnect to receive a dynamic address after its reservation is removed.
 
@@ -108,13 +108,13 @@ that a cap is being enforced. See TRAFFIC_STATUS.md.
 
 ## Features intentionally skipped
 
-| Requested feature | Status in 0.8.0 |
+| Requested feature | Status in 0.8.1 |
 |---|---|
 | Exact connection start time | Not reported by the native client/lease metadata used here. No lease-expiration subtraction or first-observation estimate is substituted. |
-| Cumulative per-device data usage | Not implemented. Software meter counters can reset and do not provide historical usage. |
+| Historical unmonitored usage | Not available. Recorded IPv4 usage is now accumulated persistently per IP/MAC only from observed monitor counters. |
 | Internet-only / IPv6 throughput | The optional monitor reports IPv4 traffic including local traffic, not Internet-only or IPv6 throughput. |
 | IPv6 or aggregate multi-address cap | Not implemented. Software policing applies separately to each current IPv4/MAC binding. |
-| Per-device data quota | Not implemented without reliable per-client usage and enforcement. |
+| Per-device data quota | Not implemented. Recorded usage does not enforce a byte quota. |
 | Individual USB blocking | No native per-client control is used; USB tethering is not stopped as a substitute. |
 | Automatic physical device type/model | Unknown until assigned manually. Hostnames remain labeled as client-supplied DHCP hostnames. |
 

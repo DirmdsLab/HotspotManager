@@ -62,6 +62,10 @@ final class TrafficEngine {
     Map<String, Rate> tick() throws Exception {
         TrafficMode.verifyReady(context);
         batch = readBatch();
+        // Capture the old rule before a rate-policy change replaces its counters.
+        for (Binding binding : bindings.values()) {
+            if (part(binding.client.iface + "_index").trim().equals(binding.ifindex)) capture(binding);
+        }
         Map<String, TrafficRules.Client> clients = new LinkedHashMap<>();
         for (String iface : TrafficRules.IFACES) {
             for (TrafficRules.Client client : TrafficRules.neighbors(iface, part(iface + "_neighbors"))) {
@@ -106,6 +110,8 @@ final class TrafficEngine {
             verifyOwned(binding.client.iface, "egress", binding.pref);
             long up = TrafficRules.acceptedBytes(TrafficRules.selectedFilter(part(binding.client.iface + "_ingress"), binding.pref));
             long down = TrafficRules.acceptedBytes(TrafficRules.selectedFilter(part(binding.client.iface + "_egress"), binding.pref));
+            store.account(key(binding.client.iface, "ingress", binding.pref), up);
+            store.account(key(binding.client.iface, "egress", binding.pref), down);
             double downMbps = TrafficRules.mbps(binding.lastDown, down, now - binding.lastTime);
             double upMbps = TrafficRules.mbps(binding.lastUp, up, now - binding.lastTime);
             rates.put(binding.client.key(), new Rate(downMbps, upMbps, binding.down, binding.up));
@@ -127,11 +133,11 @@ final class TrafficEngine {
         if (!ifindex.matches("[0-9]+")) throw new IllegalStateException("Downstream disappeared before filter installation.");
         String qdiscs = TrafficMode.root("tc qdisc show dev " + iface);
         if (!qdiscs.contains("qdisc clsact")) {
-            TrafficMode.root("tc qdisc add dev " + iface + " clsact");
+            mutate(iface, ifindex, "tc qdisc add dev " + iface + " clsact");
             store.owned("owned_qdisc_" + iface, new JSONObject().put("boot", boot).put("ifindex", ifindex).toString());
         }
         for (String direction : new String[] {"ingress", "egress"}) {
-            String existing = TrafficMode.root(TrafficRules.show(iface, direction, binding.pref));
+            String existing = readFilter(iface, direction, binding.pref);
             if (!existing.trim().isEmpty()) throw new IllegalStateException("Conflicting tc filter; existing rule was not replaced.");
             String key = key(iface, direction, binding.pref);
             String cookie = java.util.UUID.randomUUID().toString().replace("-", "");
@@ -140,8 +146,8 @@ final class TrafficEngine {
                     .put("ip", binding.client.ip).put("mac", binding.client.mac).put("cookie", cookie).put("pending", true);
             store.owned(key, record.toString());
             // Prove cookie/counter support with a non-dropping rule before applying any cap.
-            TrafficMode.root(TrafficRules.filter(binding.client, direction, binding.pref, 0, cookie));
-            String installed = TrafficMode.root(TrafficRules.show(iface, direction, binding.pref));
+            mutate(iface, ifindex, TrafficRules.filter(binding.client, direction, binding.pref, 0, cookie));
+            String installed = readFilter(iface, direction, binding.pref);
             if (!TrafficRules.hasCookie(installed, cookie)) {
                 throw new IllegalStateException("tc ownership cookies are not readable. No speed cap was requested.");
             }
@@ -155,8 +161,8 @@ final class TrafficEngine {
                 String changed = TrafficRules.filter(binding.client, direction, binding.pref, rate, cookie)
                         .replace("tc filter add ", "tc filter replace ")
                         .replace(" u32 match ", " handle " + handle.group(1) + " u32 match ");
-                TrafficMode.root(changed);
-                installed = TrafficMode.root(TrafficRules.show(iface, direction, binding.pref));
+                mutate(iface, ifindex, changed);
+                installed = readFilter(iface, direction, binding.pref);
                 if (!TrafficRules.hasCookie(installed, cookie)) throw new IllegalStateException("Updated filter ownership was lost.");
                 TrafficRules.acceptedBytes(installed);
                 record.put("fingerprint", TrafficRules.fingerprint(installed));
@@ -167,6 +173,14 @@ final class TrafficEngine {
 
     private void remove(Binding binding) throws Exception {
         for (String direction : new String[] {"ingress", "egress"}) removeRecorded(key(binding.client.iface, direction, binding.pref));
+    }
+
+    private void capture(Binding binding) throws Exception {
+        for (String direction : new String[] {"ingress", "egress"}) {
+            verifyOwned(binding.client.iface, direction, binding.pref);
+            store.account(key(binding.client.iface, direction, binding.pref), TrafficRules.acceptedBytes(
+                    TrafficRules.selectedFilter(part(binding.client.iface + "_" + direction), binding.pref)));
+        }
     }
 
     private void verifyOwned(String iface, String direction, int pref) throws Exception {
@@ -196,7 +210,7 @@ final class TrafficEngine {
                 String ingress = TrafficMode.root("tc filter show dev " + iface + " ingress");
                 String egress = TrafficMode.root("tc filter show dev " + iface + " egress");
                 if (ingress.trim().isEmpty() && egress.trim().isEmpty()) {
-                    TrafficMode.root("tc qdisc del dev " + iface + " clsact");
+                    mutate(iface, record.getString("ifindex"), "tc qdisc del dev " + iface + " clsact");
                     store.owned(key, null);
                 }
                 // Do not delete a clsact now shared with another component.
@@ -215,41 +229,56 @@ final class TrafficEngine {
         if (!boot.equals(record.optString("boot")) || !part(iface + "_index").trim().equals(record.optString("ifindex"))) {
             store.owned(key, null); return;
         }
-        String actual = TrafficMode.root(TrafficRules.show(iface, direction, pref));
+        String actual = readFilter(iface, direction, pref);
         if (actual.trim().isEmpty()) { store.owned(key, null); return; }
         String cookie = record.optString("cookie");
         if (!TrafficRules.ownsPreference(actual, cookie)) {
-            throw new IllegalStateException("Filter ownership cookie mismatch; the conflicting rule was retained.");
+            android.util.Log.e("WaguriTraffic", "Ownership check: " + iface + " " + direction + " pref=" + pref
+                    + " expectedCookie=" + cookie + " kernel=" + actual);
+            throw new IllegalStateException("Kernel ownership mismatch on " + iface + " " + direction + " pref " + pref + "; existing filter retained. See WaguriTraffic log.");
         }
-        TrafficMode.root(TrafficRules.delete(iface, direction, pref));
+        try { store.account(key, TrafficRules.acceptedBytes(actual)); }
+        catch (Exception error) {
+            TrafficService.usageWarning = "Usage checkpoint failed: " + error.getMessage();
+            android.util.Log.e("WaguriTraffic", TrafficService.usageWarning, error);
+        }
+        mutate(iface, record.getString("ifindex"), TrafficRules.delete(iface, direction, pref));
         store.owned(key, null);
     }
 
     private static String key(String iface, String direction, int pref) { return "owned_" + iface + "_" + direction + "_" + pref; }
     private String part(String name) { return batch.getOrDefault(name, ""); }
 
-    private static Map<String, String> readBatch() {
-        StringBuilder command = new StringBuilder();
-        for (String iface : TrafficRules.IFACES) {
-            command.append("echo __HM_").append(iface).append("_index__; cat /sys/class/net/").append(iface).append("/ifindex 2>/dev/null;\n")
-                    .append("echo __HM_").append(iface).append("_neighbors__; ip -4 neigh show dev ").append(iface).append(" 2>/dev/null;\n");
-            for (String direction : new String[] {"ingress", "egress"}) {
-                command.append("echo __HM_").append(iface).append('_').append(direction).append("__; tc -s filter show dev ")
-                        .append(iface).append(' ').append(direction).append(" 2>/dev/null;\n");
-            }
-        }
-        command.append("echo __HM_END__");
-        RootShell.Result result = RootShell.run(command.toString(), 1048576);
-        if (result.exitCode != 0 || !result.output.contains("__HM_END__")) throw new IllegalStateException("Traffic sample was incomplete.");
-        Map<String, String> values = new HashMap<>();
-        String current = null;
-        StringBuilder value = new StringBuilder();
+    private static void mutate(String iface, String ifindex, String command) {
+        TrafficRules.show(iface, "ingress", TrafficRules.FIRST_PREF);
+        if (!ifindex.matches("[0-9]+")) throw new IllegalArgumentException("Invalid interface identity.");
+        TrafficMode.root("if [ \"$(cat /sys/class/net/" + iface + "/ifindex 2>/dev/null)\" = " + ifindex
+                + " ]; then " + command + "; else echo 'Downstream changed before traffic update; retry monitoring.'; exit 1; fi");
+    }
+
+    private String readFilter(String iface, String direction, int pref) throws Exception {
+        TrafficRules.show(iface, direction, pref);
+        return TrafficRules.selectedFilter(query(" " + RootShell.quote(iface) + " " + RootShell.quote(direction)).getString("filters"), pref);
+    }
+
+    private JSONObject query(String args) throws Exception {
+        String apk = context.getApplicationInfo().sourceDir;
+        RootShell.Result result = RootShell.run("CLASSPATH=" + RootShell.quote(apk)
+                + " /system/bin/app_process /system/bin " + TrafficCli.class.getName() + args, 1048576);
         for (String line : result.output.split("\\r?\\n")) {
-            if (line.startsWith("__HM_") && line.endsWith("__")) {
-                if (current != null) values.put(current, value.toString());
-                current = line.substring(5, line.length() - 2); value.setLength(0);
-            } else if (current != null) value.append(line).append('\n');
+            if (!line.startsWith(TrafficCli.PREFIX)) continue;
+            JSONObject data = new JSONObject(line.substring(TrafficCli.PREFIX.length()));
+            if (result.exitCode != 0 || !data.optBoolean("ok")) throw new IllegalStateException(data.optString("error", "Kernel snapshot failed."));
+            return data;
         }
+        throw new IllegalStateException("Kernel snapshot helper failed (exit " + result.exitCode + "): " + result.output.trim());
+    }
+
+    private Map<String, String> readBatch() throws Exception {
+        JSONObject data = query("");
+        Map<String, String> values = new HashMap<>();
+        for (String iface : TrafficRules.IFACES) for (String suffix : new String[] {"_index", "_neighbors", "_ingress", "_egress"})
+            values.put(iface + suffix, data.getString(iface + suffix));
         return values;
     }
 }

@@ -1,4 +1,4 @@
-# IPv4 speed and rate control in 0.8.0
+# IPv4 speed and rate control in 0.8.1
 
 ## What the diagnostic established
 
@@ -9,7 +9,14 @@ Native BPF accounting is keyed by upstream interface; it does not supply a
 separate instantaneous speed for every client IP. The diagnostic contained no
 proof that a new software limiter would intercept accelerated traffic.
 
-The implementation therefore provides an explicit Software QoS mode. It is off
+Version 0.8.1 reads the kernel's full ownership cookies and accepted-byte counters
+through RTM_GETTFILTER netlink dumps. It no longer depends on the formatting of
+vendor tc statistics output. The supplied log confirms normal DHCP/upstream
+activity but contains no traffic filter dump, so the precise old mismatch could
+not be independently reproduced. The new path removes that text-parser dependency
+and preserves the original error when cleanup also fails.
+
+The implementation provides an explicit Software QoS mode. It is off
 by default. The original DHCP, gateway, DNS, reservations, USB-first recovery,
 GUI switches, and ADB tethering commands are retained.
 
@@ -43,7 +50,7 @@ require opening the app and starting it again.
 
 - Only IPv4 on ap0 / 192.168.77.0/24 and rndis0 / 192.168.78.0/24 is supported.
 - Values include local IPv4 traffic and protocol overhead. They are not
-  Internet-only application payload speeds, Wi-Fi link rates, cumulative usage,
+  Internet-only application payload speeds, Wi-Fi link rates, unmonitored history,
   or IPv6 statistics. IPv6 is not limited and can bypass an IPv4 cap.
 - Each filter matches both the IP and MAC, so another MAC reusing an old IP does
   not inherit its cap. Each current IPv4 binding receives the saved policy;
@@ -68,15 +75,38 @@ and Stop action. A process kill/force-stop can leave the last kernel rules until
 recovery or reboot. Use Stop or Restore to verify cleanup; do not assume that
 closing the screen or killing the process removed a limit.
 
-Cumulative data usage, quotas, exact connection-start time, IPv6 limits, aggregate
+Unmonitored historical usage, quotas, exact connection-start time, IPv6 limits, aggregate
 multi-address limits, and individual native USB blocking remain unimplemented.
+
+## Recorded data usage
+
+The device card and details show recorded Down/Up usage for the selected IPv4/MAC
+binding and a total for the MAC across its addresses/interfaces. Binary units
+are explicit (KiB/MiB/GiB). Totals persist in private app preferences across
+monitor restarts, same-key updates, reconnects, and rate-policy changes.
+
+Each accepted-byte counter has a saved cursor. Its delta and both usage totals
+are committed together; reading the same counter twice or restarting the process
+does not count the same bytes again. Old rules are sampled before policy changes
+and again before verified cleanup. Initial owned counters start at zero; a reset
+counter contributes its new observed bytes. Missing counters are not estimated.
+
+Reset recorded usage for this MAC clears only its usage and establishes a fresh
+baseline at the next sample. Full device Reset also clears usage. Speed policies,
+other MACs, and DHCP reservations are retained by the usage-only reset.
+
+These are observed accepted IPv4 bytes, including local traffic and headers,
+not carrier billing. Traffic while monitoring is off, IPv6, and data lost when an
+interface/kernel counter vanishes between samples cannot be reconstructed. A
+hard process kill may miss a short interval; surviving owned counters can be
+reconciled on the next start. There is no data-quota enforcement.
 
 ## Ownership and recovery
 
 The app retains native root qdiscs and existing BPF/other filters. It allocates
 unoccupied IPv4 priorities 50000–50127 on clsact ingress/egress. Random action
 cookies, kernel boot identity, interface index, and rule fingerprints are saved
-for ownership checks. A non-dropping meter proves cookie/counter readback before
+for ownership checks. A non-dropping meter proves full kernel cookie/counter readback before
 any speed cap is requested. A failure stops monitoring and attempts cleanup.
 
 Cleanup removes only a priority verified to contain a single owned leaf filter.
@@ -107,7 +137,7 @@ Do not use that example for a phone whose original settings were non-null.
 
 ## Required physical verification
 
-Host tests validate command validation, counter parsing, Mbps conversion,
+Host tests validate command validation, binary netlink framing, 64-bit counter/cookie parsing, byte accumulation, Mbps conversion,
 ownership parsing, and offload guards. No physical Android device was available
 for live traffic, GUI, notification, or vendor enforcement testing.
 
@@ -127,6 +157,17 @@ On the phone, verify the following before depending on a cap:
 7. Restore and reboot, then repeat original gateway, DNS, tethering-toggle, and
    reservation tests.
 
+The monitoring log is separate from DHCP hook logs:
+
+```bash
+adb logcat -d -s WaguriTraffic:V '*:S'
+```
+
+Keep the original failure and cleanup failure together. An ownership mismatch
+logs the specific interface/direction/priority and its kernel filter snapshot;
+it can include local MAC/IP identifiers. A true foreign filter is still retained.
+Do not delete Android's entire qdisc to bypass ownership checks.
+
 The read-only tools/traffic-diagnostics.sh remains available for collecting
 native state. Its output may include private network identifiers; it is not
 included in this source package and is never collected automatically.
@@ -145,3 +186,8 @@ included in this source package and is never collected automatically.
   https://android.googlesource.com/platform/external/iproute2/+/refs/heads/android16-release/tc/m_police.c
 - Linux policing semantics:
   https://man7.org/linux/man-pages/man8/tc-police.8.html
+
+- Kernel U32/action-cookie ABI:
+  https://android.googlesource.com/kernel/common/+/refs/heads/android12-5.10/include/uapi/linux/pkt_cls.h
+- Android netlink socket addresses:
+  https://android.googlesource.com/platform/libcore/+/refs/heads/android16-release/luni/src/main/java/android/system/NetlinkSocketAddress.java
